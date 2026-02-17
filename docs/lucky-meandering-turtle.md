@@ -6,21 +6,65 @@ Building a B2C voice-first coaching app: "I have 3 minutes -- drill me on my inv
 
 **Confirmed decisions:** React Native, Deepgram STT+TTS, OpenAI (Structured Outputs), 3-minute investor pitch drill, server-authoritative timer.
 
+## Critical Fixes Applied to This Plan
+
+This plan has been hardened based on implementation experience. The following landmines were identified and fixed:
+
+1. **Audio chunking mismatch:** Spec now explicitly requires 20ms chunks (640 bytes) with JS-side slicing if native library emits larger buffers. No more "640 bytes in theory, 4096 bytes in practice."
+
+2. **Base64 transport bottleneck:** Plan now treats base64 audio decode as a **measured risk** requiring early profiling. Fallback to custom native module is documented.
+
+3. **Binary framing rules:** Explicit rules added for direction-based type distinction, validation, buffer caps, and backpressure handling.
+
+4. **Barge-in pipeline completeness:** Six-step cancellation sequence is now **mandatory and tested**, not optional. Missing any step = coach keeps talking.
+
+5. **Canonical constants enforcement:** All Deepgram STT/TTS parameters must come from `/packages/shared/src/constants.ts`. No hardcoded values.
+
+6. **Auth hardening:** Rate limiting + device binding are now **required in Phase 1.0**, not deferred.
+
+7. **Persistence crash strategy:** Explicit behavior defined for batch insert failures, session end timeouts, and DB unavailability.
+
+8. **Backgrounding safety:** App must pause capture/playback when backgrounded and require user tap to resume (prevents accidental recording).
+
+9. **WS backpressure:** Server must check `socket.bufferedAmount` and drop TTS chunks if > 64KB (prevents OOM on slow networks).
+
+10. **WebSocket stack clarity:** Only `@fastify/websocket` is used. No separate `ws` dependency. Socket parameter is `ws.WebSocket` directly.
+
 ### Phase 1.0 vs 1.1 Scope Split
 
 **Phase 1.0 (ship now -- proves the product):**
+These features are **REQUIRED** to prove the core value prop. Do not ship without them.
 - Full voice loop: STT → LLM → TTS → client playback
-- Server-authoritative hard timer (180s)
-- Barge-in cancel (full pipeline: OpenAI stream + chunker + TTS + client buffer)
-- Push-to-talk with live transcripts
-- Session persistence (start/end, transcripts, errors)
-- Anonymous auth with device binding
+- Server-authoritative hard timer (180s) with hard stop at expiry
+- **Barge-in cancel (full pipeline: OpenAI stream abort + chunker reset + TTS clear + client buffer drop)**
+- Push-to-talk with live transcripts (partial + final)
+- Session persistence (start/end, transcripts, errors) with crash-safe batch writes
+- Anonymous auth with device binding + rate limiting
+- Audio chunking at 20ms (640 bytes) with base64 decode or native fallback
+- Jitter buffer with hard cap (2000ms) and instant drop on barge-in
+- WS backpressure handling (drop TTS chunks if `bufferedAmount > 64KB`)
+- App backgrounding safety (pause capture/playback, show resume prompt)
 
 **Phase 1.1 (polish next -- not blocking the demo):**
-- Redis resume token + full reconnect with `last_server_event_id` replay
-- `/v1/metrics` percentile computation (Phase 1.0 logs raw timings only)
-- Pacing loop (LLM-driven interrupts every 5s)
-- Adaptive jitter buffer sizing
+These features improve reliability/UX but are not required for the initial proof.
+- Redis resume token + full reconnect with `last_server_event_id` replay (Phase 1.0: basic reconnect starts new session)
+- `/v1/metrics` endpoint with percentile computation (Phase 1.0: log raw per-turn timestamps via pino, compute offline)
+- Pacing loop (LLM-driven interrupts every 5s based on progress) (Phase 1.0: fixed time warnings at 60s + 15s)
+- Adaptive jitter buffer sizing (Phase 1.0: fixed 300ms min buffer)
+- Client network quality indicators (Phase 1.0: log warnings server-side only)
+
+**If you must cut scope to ship faster:**
+Safe to defer to Phase 1.1 without breaking the demo:
+- Pacing loop (use fixed time warnings instead)
+- `/v1/metrics` endpoint (log timings, compute later)
+- Full reconnect with event replay (accept that disconnect = new session)
+
+**Do NOT cut:**
+- Barge-in (this is the killer feature)
+- Server-authoritative timer (this is the constraint)
+- Audio chunking + base64 handling (breaks turn-taking)
+- Auth hardening (prevents abuse)
+- Backgrounding safety (prevents accidental recording)
 
 ---
 
@@ -52,7 +96,8 @@ Building a B2C voice-first coaching app: "I have 3 minutes -- drill me on my inv
 
 ### Task 3: Backend scaffold
 - `/apps/backend/package.json` dependencies:
-  - `fastify`, `@fastify/websocket`, `@fastify/cors` (NO separate `ws` dep -- `@fastify/websocket` exposes `ws.WebSocket` directly)
+  - `fastify`, `@fastify/websocket`, `@fastify/cors`, `@fastify/rate-limit`
+  - **IMPORTANT:** NO separate `ws` dependency. `@fastify/websocket` exposes `ws.WebSocket` directly via the socket parameter.
   - `ioredis`, `pg`
   - `ajv`, `jose` (JWT), `pino`, `dotenv`, `openai`, `uuid`
   - devDeps: `vitest`, `typescript`, `@types/ws`, `tsx`
@@ -137,11 +182,12 @@ interface BaseEvent {
 Binary frames (audio.chunk, tts.chunk) are raw PCM bytes -- no JSON envelope.
 
 **Binary Framing Rules (must be documented in PROTOCOL.md):**
-1. **Direction distinguishes type:** Client→Server binary = user audio. Server→Client binary = TTS audio. No ambiguity.
-2. **Binary before `audio.start` is an error:** Server MUST reject binary frames received before a valid `audio.start` event. Send `server.error` with `ERR_SESSION_STATE`.
+1. **Direction distinguishes type:** Client→Server binary = user audio. Server→Client binary = TTS audio. No ambiguity. No header/magic bytes needed.
+2. **Binary before `audio.start` is an error:** Server MUST reject binary frames received before a valid `audio.start` event. Send `server.error` with `ERR_SESSION_STATE` and close connection.
 3. **Sequence numbers are implicit:** Frames arrive in WebSocket order (TCP guarantees). `last_client_audio_seq` / `last_server_tts_seq` in Redis are monotonic counters incremented per frame, used for resumption bookkeeping only (Phase 1.1).
-4. **Max frame size:** 640 bytes (20ms at 16kHz mono 16-bit). Server logs warning if frame > 1280 bytes (>40ms), drops if > 8192 bytes.
+4. **Target frame size:** 640 bytes (20ms at 16kHz mono 16-bit). Server accepts frames up to 1280 bytes (40ms), logs warning. Drops frames > 8192 bytes (256ms indicates buffer problem).
 5. **No interleaving:** Client must not send binary and JSON in the same WebSocket message. One frame = one type.
+6. **Buffer caps:** Client jitter buffer MUST enforce `JITTER_BUFFER_CAP_MS` (2000ms) hard cap. Drop oldest chunks if exceeded. Server monitors `socket.bufferedAmount` and skips TTS chunks if > 64KB (prevents unbounded memory growth on slow networks).
 
 Client events (discriminated union `ClientEvent`):
 - `client.hello` → `{ protocol_version: string, app_version: string, device_info: { platform: 'ios'|'android', os_version: string } }`
@@ -254,9 +300,10 @@ export const HEARTBEAT_INTERVAL_MS = 15_000;
 export const HEARTBEAT_TIMEOUT_MS = 30_000;
 
 // Deepgram STT -- CANONICAL values (do NOT duplicate elsewhere)
+// These values MUST be used in all STT adapter connection URLs. No hardcoded values allowed.
 export const DEEPGRAM_STT_MODEL = 'nova-2';
 export const DEEPGRAM_STT_ENDPOINTING_MS = 500;
-export const DEEPGRAM_STT_UTTERANCE_END_MS = 800;  // NOT 1000. Standardized.
+export const DEEPGRAM_STT_UTTERANCE_END_MS = 800;  // STANDARDIZED: use this value, not 1000
 export const DEEPGRAM_STT_KEEPALIVE_INTERVAL_MS = 30_000;
 
 // Deepgram TTS -- CANONICAL values
@@ -335,10 +382,31 @@ await app.register(fastifyWebsocket);
   ```
 - `transcripts.ts`: `insertTranscript(sessionId, turnIndex, speaker, isFinal, text, provider, confidence)`
 
-**Persistence crash strategy:**
-- **Must-persist events (write immediately, not batched):** `session.start`, `session.end`, `server.error` with severity >= ERROR. These use individual `INSERT` statements, not the batch buffer.
-- **Batch event insert failure:** If batch `INSERT` fails, retry once after 200ms. If retry fails, log to pino (structured JSON) and continue session -- do NOT block the voice loop for DB writes. Events are lost but session continues.
-- **Session end persistence:** On `timer.expired` or `server.goodbye`, flush the event batch buffer synchronously before closing the WS. Use a 2-second timeout -- if flush times out, close anyway and log the lost events.
+**Persistence crash strategy (defines behavior when DB writes fail):**
+
+1. **Must-persist events (write immediately, not batched):**
+   - `session.start`, `session.end`, `server.error` (severity >= ERROR)
+   - Use individual `INSERT` statements, NOT the batch buffer
+   - If these fail: retry once after 200ms with exponential backoff
+   - If retry fails: log error to pino (structured JSON) + Sentry/error tracker, but continue session
+   - **Rationale:** Session state is more important than perfect event log. Better to have incomplete logs than crash the session.
+
+2. **Batch event insert failure:**
+   - If batch `INSERT` fails (network, timeout, constraint violation), retry once after 200ms
+   - If retry fails: log to pino (structured JSON) and **continue session** -- do NOT block the voice loop for DB writes
+   - Events in that batch are LOST, but session continues
+   - Set a flag `db_write_degraded` in session state and send a low-priority `server.warning` to client (Phase 1.1)
+
+3. **Session end persistence:**
+   - On `timer.expired` or `server.goodbye`, flush the event batch buffer **synchronously** before closing WS
+   - Use a 2-second timeout on the flush
+   - If timeout fires: close WS anyway and log the lost events (with session_id for later recovery)
+   - **Rationale:** Clean session closure is more important than a few lost events. Don't hang connections waiting for DB.
+
+4. **Transcript insert failure:**
+   - Transcripts are best-effort, not critical path
+   - If `insertTranscript()` fails, log error but do NOT block session
+   - User won't see live transcripts if DB is down, but voice loop continues
 
 ### Task 14: Redis layer
 **`/apps/backend/src/redis/client.ts`**: ioredis singleton with auto-reconnect:
@@ -378,10 +446,23 @@ interface LiveSessionState {
 
 **`POST /v1/auth/anonymous`**: body `{ device_id: string }` → `findOrCreateAnonymousUser` → returns `{ token, user_id, expires_at }`
 
-**Auth hardening (Phase 1.0):**
-- **Rate limit `/v1/auth/anonymous`:** max 10 requests per minute per IP (use Fastify `@fastify/rate-limit` or simple in-memory counter). Prevents token-farming.
-- **Device binding on resume:** JWT contains `device_id` claim. On WS `client.resume`, verify `device_id` from JWT matches the original session's `device_id` in Redis. Reject mismatches with `ERR_UNAUTHORIZED`.
-- **Token expiry:** 24h. No refresh flow in Phase 1.0 -- user gets a new anonymous token on next app open.
+**Auth hardening (Phase 1.0 -- REQUIRED, not optional):**
+
+1. **Rate limit `/v1/auth/anonymous`:**
+   - Max 10 requests per minute per IP (use `@fastify/rate-limit`)
+   - Prevents token-farming and abuse
+   - Return 429 with `Retry-After` header if exceeded
+
+2. **Device binding on resume:**
+   - JWT contains `device_id` claim
+   - On WS `client.resume` (Phase 1.1) or session start, verify `device_id` from JWT matches the original session's `device_id` in Redis
+   - Reject mismatches with `ERR_UNAUTHORIZED` and close connection
+   - Prevents token theft / session hijacking
+
+3. **Token expiry:**
+   - 24h lifetime
+   - No refresh flow in Phase 1.0 -- user gets a new anonymous token on next app open
+   - Expired tokens return `auth.error` on WS connection, client must re-authenticate via HTTP
 
 ### Task 16: HTTP endpoints
 - `GET /healthz` → 200 `{ status: 'ok' }`
@@ -406,7 +487,19 @@ interface LiveSessionState {
 **`/apps/backend/src/adapters/stt/deepgram.ts`**: `DeepgramSTTAdapter`
 
 **Connection URL** (built from shared constants -- NEVER hardcode these values):
+
+**CRITICAL:** All parameters MUST come from `/packages/shared/src/constants.ts`. No hardcoded values allowed. This ensures consistency across environments and makes tuning trivial.
+
 ```typescript
+import {
+  DEEPGRAM_STT_MODEL,
+  DEEPGRAM_STT_ENDPOINTING_MS,
+  DEEPGRAM_STT_UTTERANCE_END_MS,
+  AUDIO_CODEC,
+  AUDIO_SAMPLE_RATE,
+  AUDIO_CHANNELS
+} from '@coach/shared';
+
 const url = `wss://api.deepgram.com/v1/listen?model=${DEEPGRAM_STT_MODEL}`
   + `&interim_results=true`
   + `&endpointing=${DEEPGRAM_STT_ENDPOINTING_MS}`
@@ -414,6 +507,8 @@ const url = `wss://api.deepgram.com/v1/listen?model=${DEEPGRAM_STT_MODEL}`
   + `&encoding=${AUDIO_CODEC}&sample_rate=${AUDIO_SAMPLE_RATE}&channels=${AUDIO_CHANNELS}`
   + `&punctuate=true&smart_format=true`;
 ```
+
+**Why this matters:** If you hardcode `utterance_end_ms=1000` in one place and use the constant (800) elsewhere, turn-taking logic becomes inconsistent and debugging becomes hell.
 
 **Authentication**: `Authorization: Token ${apiKey}` header on WebSocket upgrade.
 
@@ -506,6 +601,12 @@ class TextChunker extends EventEmitter {
       this.emit('sentence', this.buffer.trim());
       this.buffer = '';
     }
+  }
+
+  reset(): void {
+    // CRITICAL for barge-in: drop all buffered text
+    // Called when user interrupts coach mid-sentence
+    this.buffer = '';
   }
 
   private extractCompleteSentences(): string[] {
@@ -690,16 +791,24 @@ User speech ends (audio.stop + stt.final)
   → Also send coach.text (JSON) with full text for captions
 ```
 
-**Cancellation (FULL pipeline -- missing ANY step makes coach "keep talking"):**
-If `handleBargeIn()` called mid-pipeline, ALL of these must fire:
-1. `controller.abort()` → stops OpenAI stream immediately (catch `AbortError`)
-2. `textChunker.reset()` → drop all buffered tokens and queued sentences
-3. `ttsAdapter.clear()` → sends `{ type: "Clear" }` to Deepgram, returns Promise
-4. Wait for `cleared` confirmation (with 2s timeout fallback)
-5. Send `tts.cleared` to client WS
-6. Client drops jitter buffer instantly on receiving `tts.cleared`
+**CRITICAL: Barge-in cancellation -- FULL pipeline or coach keeps talking**
 
-**If any step is skipped:** The coach will resume speaking ~500ms-2s later. This is the #1 UX-breaking bug to test for.
+If `handleBargeIn()` called mid-pipeline, **ALL SIX of these steps must fire, in order, with NO exceptions:**
+
+1. **Abort OpenAI stream:** `controller.abort()` → stops token generation immediately, catch `AbortError` in streaming loop
+2. **Reset text chunker:** `textChunker.reset()` → drop all buffered tokens and queued sentences (prevents stale text from reaching TTS)
+3. **Clear TTS adapter:** `ttsAdapter.clear()` → sends `{ type: "Clear" }` to Deepgram WebSocket, returns Promise
+4. **Wait for confirmation:** Await `cleared` event from TTS adapter (with 2s timeout fallback)
+5. **Notify client:** Send `tts.cleared` to client WebSocket
+6. **Client drops buffer:** Client flushes jitter buffer instantly on receiving `tts.cleared` (do NOT drain remaining audio)
+
+**If ANY step is skipped or fails silently:** The coach will resume speaking 500ms-2s later. This is the #1 UX-breaking bug. Test with rapid triple barge-in (press PTT 3 times in 2 seconds while coach is speaking) to verify no residual audio leaks through.
+
+**Testing checklist:**
+- Barge-in during LLM generation (before first TTS byte) → no audio plays
+- Barge-in during TTS playback → audio stops within 150ms
+- Rapid 3x barge-in → no audio leak, no deadlock
+- Network delay on TTS clear confirmation → timeout fires, session continues
 
 ### Task 28: Latency instrumentation
 **`/apps/backend/src/orchestrator/metrics.ts`**
@@ -732,15 +841,34 @@ Compute:
 **`/apps/backend/src/ws/handler.ts`**
 
 Register at `GET /v1/ws` via `@fastify/websocket`:
+
+**IMPORTANT:** `@fastify/websocket` wraps the `ws` library. The `socket` parameter in your handler IS a `ws.WebSocket` object directly. You do NOT need a separate `ws` dependency. Import types with `import type { WebSocket } from 'ws';` for TypeScript.
+
 ```typescript
-app.get('/v1/ws', { websocket: true }, (socket, req) => {
-  // socket IS the ws.WebSocket object
+import type { WebSocket } from 'ws';  // Type-only import for socket typing
+
+app.get('/v1/ws', { websocket: true }, (socket: WebSocket, req) => {
+  // socket is ws.WebSocket -- has .send(), .close(), .ping(), .readyState, etc.
+
   socket.on('message', (data: Buffer | string) => {
     if (typeof data === 'string') {
       // JSON control message → parse, validate, route
+      const event = JSON.parse(data);
+      // ... validation + routing
     } else {
       // Binary audio frame → forward to orchestrator
+      orchestrator.handleAudioChunk(data);
     }
+  });
+
+  socket.on('close', (code, reason) => {
+    orchestrator.handleDisconnect();
+    sessionMap.delete(connectionId);
+  });
+
+  socket.on('error', (err) => {
+    logger.error({ err, connectionId }, 'WebSocket error');
+    // Do NOT crash server on socket error
   });
 });
 ```
@@ -808,26 +936,34 @@ React Native's built-in WebSocket supports binary frames via `binaryType = 'arra
 
 Uses **`react-native-live-audio-stream`** -- streams raw PCM chunks in real-time.
 
-**IMPORTANT: bufferSize vs chunk size mismatch fix.**
-The library's `bufferSize` controls the native buffer, NOT the JS callback frequency. `bufferSize: 4096` emits ~256ms chunks (4096 bytes). We need 20ms chunks (640 bytes) for responsive turn-taking. Solution: accept larger native buffers, then **slice in JS** before sending over WebSocket.
+**CRITICAL: Audio chunking + base64 transport**
+
+The target is 20ms chunks (640 bytes at 16kHz mono 16-bit) for responsive turn-taking and low-latency barge-in. However, the library has two performance traps:
+
+1. **bufferSize mismatch:** `bufferSize: 4096` produces ~256ms chunks (4096 bytes), NOT 20ms. This destroys turn-taking latency.
+2. **Base64 encoding overhead:** The library emits base64 strings. Decoding adds CPU + GC pressure + latency jitter exactly where you can't afford it.
+
+**Solution (Phase 1.0):**
+- Accept native buffers at 4096 bytes (library limitation)
+- **Slice in JS** into 640-byte subframes before sending
+- **Measure dropped frames in first test session.** If CPU profiling shows >5% dropped frames or >10ms decode jitter, you MUST escalate to a custom native module that emits raw `ArrayBuffer` directly (no base64 round-trip).
 
 ```typescript
 import LiveAudioStream from 'react-native-live-audio-stream';
-import { AUDIO_CHUNK_BYTES } from '@coach/shared';
+import { AUDIO_CHUNK_BYTES } from '@coach/shared';  // 640
 
 LiveAudioStream.init({
   sampleRate: 16000,
   channels: 1,
   bitsPerSample: 16,
   audioSource: 6,  // Android: VOICE_COMMUNICATION (noise reduction)
-  bufferSize: 4096  // Native buffer. JS slicer handles 640-byte subframes below.
+  bufferSize: 4096  // Native buffer (~256ms). JS slicer below chops into 20ms.
 });
 
 LiveAudioStream.start();
 LiveAudioStream.on('data', (base64: string) => {
-  // PERFORMANCE NOTE: base64 decode adds CPU + GC pressure on mobile.
-  // Measure dropped frames early. If problematic, write a native module
-  // that emits raw ArrayBuffer directly (no base64 round-trip).
+  // PERFORMANCE WARNING: base64 decode is a known bottleneck.
+  // Profile this code path in first test. If jitter > 10ms, replace library.
   const pcmBytes = base64ToArrayBuffer(base64);
 
   // Slice into 640-byte (20ms) subframes before sending
@@ -838,7 +974,7 @@ LiveAudioStream.on('data', (base64: string) => {
 });
 ```
 
-**Base64 transport risk:** The library emits base64 strings. Decoding adds ~1-2ms per chunk plus GC pressure. For Phase 1.0 this is acceptable for the demo. If CPU profiling shows >5% dropped frames, escalate to a custom native module that bridges raw `ArrayBuffer` directly (no base64 encoding at the native layer).
+**Fallback plan if base64 is too slow:** Write a thin native module that exposes `onAudioData(callback: (buffer: ArrayBuffer) => void)` and bridges raw bytes directly to JS. iOS: AVAudioEngine tap → Data → JS ArrayBuffer. Android: AudioRecord read → byte[] → JS ArrayBuffer. No base64.
 
 **iOS audio session** (configure in native module or AppDelegate):
 - Category: `.playAndRecord` -- simultaneous capture + playback
@@ -873,13 +1009,44 @@ LiveAudioStream.on('data', (base64: string) => {
 // - stop(): stop + flush AudioTrack -- INSTANT for barge-in
 ```
 
-**Jitter buffer** (JavaScript layer):
-- Buffer 200-400ms of audio before starting playback
-- On barge-in: `stopPlayback()` drops entire buffer instantly (0ms perceived)
-- **Hard cap: `JITTER_BUFFER_CAP_MS` (2000ms).** If buffer grows beyond cap, drop oldest chunks. Prevents runaway memory on slow networks.
-- **Drop policy on barge-in:** flush entire buffer immediately, do NOT drain remaining audio.
+**Jitter buffer** (JavaScript layer -- CRITICAL for playback correctness):
 
-**WS send backpressure (server→client):** If `socket.bufferedAmount` exceeds 64KB, skip sending current TTS chunk (log warning). Client hears a brief gap but won't accumulate unbounded memory.
+1. **Initial buffering:** Accumulate 200-400ms of audio before starting playback (prevents underruns)
+
+2. **Hard cap: `JITTER_BUFFER_CAP_MS` (2000ms):**
+   - If buffer grows beyond 2000ms, **drop oldest chunks** (not newest -- avoids discontinuity)
+   - Prevents runaway memory growth on slow networks or CPU stalls
+   - Log warning when cap is hit (indicates network/performance problem)
+
+3. **Drop policy on barge-in:**
+   - On receiving `tts.cleared` from server: flush **entire buffer** instantly
+   - Do NOT drain remaining audio (user expects immediate silence)
+   - Perceived latency: 0ms (instant stop)
+
+4. **Adaptive buffering (Phase 1.1 -- optional):**
+   - Track packet loss rate (gaps in TTS sequence)
+   - If loss > 5%: increase min buffer to 400ms
+   - If loss < 1%: decrease to 200ms
+   - Phase 1.0: use fixed 300ms min buffer
+
+**WS send backpressure (server→client -- prevents memory exhaustion):**
+
+On slow mobile networks, the server may generate TTS audio faster than the client can receive it. Without backpressure handling, `socket.send()` will buffer indefinitely and crash with OOM.
+
+**Solution:**
+- Before each `socket.send(ttsBinaryChunk)`, check `socket.bufferedAmount`
+- If `bufferedAmount > 64KB` (2 seconds of audio at 32KB/s):
+  - **Skip** sending the current TTS chunk (don't queue it)
+  - Log warning: `{ session_id, bufferedAmount, action: 'dropped_tts_chunk' }`
+  - Client will hear a brief gap (~20-40ms per dropped chunk)
+  - Better than unbounded memory growth → crash
+
+**Why 64KB threshold:**
+- 2 seconds of buffered audio is already excessive for real-time
+- Indicates client is on very slow network (< 256 kbps) or CPU-bound
+- Dropping chunks degrades quality but keeps session alive
+
+**Phase 1.1 enhancement:** Send `server.warning` with `network_congestion` flag, client can show UI indicator.
 
 ### Task 37: Session screen UI
 **`/apps/mobile/src/screens/SessionScreen.tsx`**
@@ -917,10 +1084,13 @@ Coordinates WSClient + AudioCapture + AudioPlayback + UI state. Handles all serv
 - Display single drill card (3-minute investor pitch)
 - "Start Drill" button
 - Request mic permission if needed
-- "Not for use while driving" disclaimer
+- **"Not for use while driving" disclaimer** (legal CYA + safety)
 - Brief app description
 
 ### Task 39b: Backgrounding behavior (safety UX)
+**Problem:** If the app goes to background during a session (user switches apps, takes a call, locks screen), you must NOT continue recording/playing audio. This is both a privacy issue (accidental recording) and a UX issue (timer keeps running but user can't interact).
+
+**Solution:**
 **App backgrounded during session:**
 - iOS `AppState` change to `background` → pause audio capture, pause playback, send `audio.stop` if recording
 - Timer keeps running on server (server-authoritative)
@@ -989,14 +1159,65 @@ Coordinates WSClient + AudioCapture + AudioPlayback + UI state. Handles all serv
 
 ## Verification
 
-1. `docker compose -f infra/docker-compose.yml up` → Postgres + Redis + backend running
-2. `GET /healthz` → 200; `GET /readyz` → 200
-3. Run mobile on iOS simulator, tap "Start Drill"
-4. Full session: coach speaks intro → user push-to-talk pitches → coach responds → timer counts down → hard stop at 180s
-5. Barge-in: press push-to-talk while coach speaking → audio stops instantly → recording begins
-6. `GET /v1/metrics` → p50/p95 latency data present
-7. `cd apps/backend && npx vitest` → all tests pass
-8. Manual QA per RUNBOOK.md checklist
+### Phase 1.0 Acceptance Criteria (all must pass)
+
+1. **Infrastructure:**
+   - `docker compose -f infra/docker-compose.yml up` → Postgres + Redis + backend running
+   - `GET /healthz` → 200; `GET /readyz` → 200
+   - `cd apps/backend && npx vitest` → all tests pass
+
+2. **Basic session flow:**
+   - Run mobile on iOS simulator, tap "Start Drill"
+   - Full session: coach speaks intro → user push-to-talk pitches → coach responds → timer counts down → hard stop at 180s
+   - Session record persisted in `sessions` table with `status='ended'` and correct `actual_duration_ms`
+
+3. **Audio chunking verification (CRITICAL -- measure on first run):**
+   - Monitor server logs for incoming audio frame sizes
+   - Confirm frames are 640 bytes (20ms) or close (within 10%)
+   - If frames are 4096 bytes (256ms), audio chunking is broken → fails acceptance
+   - Profile client CPU during audio capture: if base64 decode takes > 10ms per chunk or causes > 5% dropped frames → escalate to native module
+
+4. **Barge-in correctness (CRITICAL -- #1 UX feature):**
+   - Press push-to-talk while coach speaking → audio stops within 150ms → recording begins immediately
+   - Rapid 3x barge-in (press PTT 3 times in 2 seconds) → no audio leak, no deadlock, no residual coach speech
+   - Barge-in during LLM generation (before first TTS byte) → no audio plays at all
+   - Server logs show: `controller.abort()` → `textChunker.reset()` → `ttsAdapter.clear()` → `cleared` confirmation → `tts.cleared` sent
+
+5. **Timer enforcement:**
+   - Timer reaches 0 exactly at 180s (±200ms tolerance)
+   - Session ends with `timer.expired` event
+   - Client shows "Time's up" and stops capture/playback
+   - WebSocket closed cleanly with code 1000
+
+6. **Auth + rate limiting:**
+   - `POST /v1/auth/anonymous` with same `device_id` returns existing user
+   - 11th request within 1 minute returns 429 (rate limit exceeded)
+   - Expired JWT on WS connect returns `auth.error` and closes connection
+
+7. **Backgrounding safety:**
+   - Background app mid-session → audio capture stops, playback stops
+   - Return to foreground → shows "Resume session (45s remaining)" prompt
+   - Tap resume → capture/playback restart cleanly
+
+8. **Latency targets (log raw timings, verify offline):**
+   - p50 end-to-end (audio.stop → tts_first_byte_sent) < 900ms
+   - p95 end-to-end < 1800ms
+   - p50 barge-in (client.barge_in → audio silence) < 50ms
+   - p95 barge-in < 150ms
+
+9. **Manual QA checklist (RUNBOOK.md):**
+   - Malformed JSON event → `server.error` with `ERR_BAD_EVENT_SCHEMA`, connection stays open
+   - Binary frame before `audio.start` → `server.error` with `ERR_SESSION_STATE`, connection closed
+   - Network disconnect during session → timer keeps running server-side
+   - Reconnect within 30s → (Phase 1.0: starts new session; Phase 1.1: resumes)
+
+### Known Limitations (acceptable for Phase 1.0)
+
+- No full reconnect with event replay (starts new session on reconnect)
+- No `/v1/metrics` endpoint (log raw timings, compute offline)
+- No adaptive jitter buffer (fixed 300ms)
+- No LLM-driven pacing loop (fixed time warnings at 60s + 15s)
+- Base64 audio transport may add 1-2ms decode latency (acceptable if < 10ms)
 
 ---
 
@@ -1271,9 +1492,19 @@ LiveAudioStream.on('data', (base64: string) => {
 ```
 
 **Chunk Timing at 16kHz:**
-- 20ms chunk: 320 samples = 640 bytes (as Int16)
-- 40ms chunk: 640 samples = 1280 bytes
-- This matches WebSocket performance sweet spot
+- 20ms chunk: 320 samples × 2 bytes = 640 bytes (Int16)
+- 40ms chunk: 640 samples × 2 bytes = 1280 bytes
+- 256ms chunk: 4096 samples × 2 bytes = 8192 bytes (BAD -- library default, must slice)
+
+**CRITICAL: bufferSize vs chunk size mismatch**
+
+The library's `bufferSize` parameter controls the native buffer size, NOT the callback frequency. Common mistake:
+- Set `bufferSize: 640` expecting 20ms chunks
+- Actually get 40-80ms chunks (library batches multiple buffers)
+- OR set `bufferSize: 4096` expecting efficient native buffering
+- Get 256ms chunks (destroys turn-taking responsiveness)
+
+**Solution:** Accept that native libraries emit whatever buffer size they want (often 128ms-256ms for efficiency). Add a **JavaScript slicer** that chops large buffers into 640-byte subframes before sending over WebSocket. This adds ~0.5-1ms of CPU overhead but preserves turn-taking latency.
 
 ### iOS Audio Session Configuration (Critical)
 
