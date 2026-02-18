@@ -89,9 +89,11 @@ set_last_step() {
 # CLAUDE EDITS THIS BLOCK ONLY
 ###############################################
 read -r -d '' CLAUDE_TASKS <<'EOF'
-# Example (Claude replaces this):
-# echo "Scaffold backend"
-# cd apps/backend && npx tsx init.ts
+# Milestone 0+1: Full monorepo verification
+npm run typecheck
+cd packages/shared && npx vitest run && cd ../..
+cd apps/backend && npx vitest run && cd ../..
+npx eslint packages/shared/src/ apps/backend/src/
 EOF
 ###############################################
 

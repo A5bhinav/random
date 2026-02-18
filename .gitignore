@@ -1,0 +1,9 @@
+node_modules
+dist
+.env
+*.pcm
+coverage
+.runner_logs
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+.turbo
