@@ -9,14 +9,18 @@ export type SideEffect =
   | 'generate_coach_turn'
   | 'start_tts'
   | 'clear_tts'
-  | 'persist_end';
+  | 'persist_end'
+  | 'extend_timer'
+  | 'replan_remaining';
 
 export type SessionEvent =
   | 'session_start'
   | 'config_validated'
+  | 'content_loaded'
   | 'plan_ready'
   | 'briefing_complete'
   | 'enter_feedback'
+  | 'session_extend'
   | 'timer_expired'
   | 'error'
   | 'audio_start'
@@ -42,6 +46,10 @@ const TRANSITIONS: Record<string, TransitionEntry> = {
     to: SessionState.PLANNING,
     sideEffects: ['generate_plan'],
   },
+  [`${SessionState.CONFIGURING}:content_loaded`]: {
+    to: SessionState.PLANNING,
+    sideEffects: ['generate_plan'],
+  },
   [`${SessionState.PLANNING}:plan_ready`]: {
     to: SessionState.BRIEFING,
     sideEffects: ['start_briefing_tts', 'start_timer'],
@@ -61,6 +69,10 @@ const TRANSITIONS: Record<string, TransitionEntry> = {
   [`${SessionState.RUNNING_REP}:barge_in`]: {
     to: SessionState.RUNNING_REP,
     sideEffects: ['clear_tts'],
+  },
+  [`${SessionState.RUNNING_REP}:session_extend`]: {
+    to: SessionState.RUNNING_REP,
+    sideEffects: ['extend_timer', 'replan_remaining'],
   },
   [`${SessionState.WRAPPING}:barge_in`]: {
     to: SessionState.WRAPPING,

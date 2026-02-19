@@ -35,13 +35,13 @@ describe('health endpoints', () => {
     expect(response.json()).toEqual({ status: 'ok' });
   });
 
-  it('GET /readyz returns 200', async () => {
+  it('GET /readyz returns 503 when Redis is not connected', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/readyz',
     });
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ status: 'ok' });
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({ status: 'unavailable' });
   });
 
   it('GET /nonexistent returns 404', async () => {

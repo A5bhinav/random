@@ -40,6 +40,20 @@ export class SessionTimer {
     return Math.max(0, this.totalMs - elapsed);
   }
 
+  /** Extend the session deadline. Clears any already-fired warnings that are
+   *  now back above the new remaining threshold so they can fire again. */
+  extend(extraMs: number): void {
+    if (this.destroyed || this.expired) return;
+    this.totalMs += extraMs;
+    // Re-arm any warnings that were fired but now have time again
+    const newRemaining = this.getRemaining();
+    for (const threshold of TIMER_WARNING_THRESHOLDS) {
+      if (newRemaining > threshold && this.firedWarnings.has(threshold)) {
+        this.firedWarnings.delete(threshold);
+      }
+    }
+  }
+
   destroy(): void {
     this.destroyed = true;
     if (this.intervalId) {

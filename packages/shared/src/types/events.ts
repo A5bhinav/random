@@ -36,8 +36,15 @@ export interface SessionStart extends BaseEvent {
   type: 'session.start';
   payload: {
     requested_duration_ms: number;
-    drill_id: string;
+    content_id: string;
     user_goal?: string;
+  };
+}
+
+export interface SessionExtend extends BaseEvent {
+  type: 'session.extend';
+  payload: {
+    extra_ms: number;
   };
 }
 
@@ -78,6 +85,7 @@ export type ClientEvent =
   | ClientHello
   | AuthAnonymous
   | SessionStart
+  | SessionExtend
   | AudioStart
   | AudioStop
   | ClientBargeIn
@@ -197,6 +205,14 @@ export interface ServerError extends BaseEvent {
   };
 }
 
+export interface ServerInterrupt extends BaseEvent {
+  type: 'server.interrupt';
+  payload: {
+    reason: 'off_topic' | 'time_pressure' | 'move_on';
+    message: string;
+  };
+}
+
 export interface ServerGoodbye extends BaseEvent {
   type: 'server.goodbye';
   payload: {
@@ -219,6 +235,7 @@ export type ServerEvent =
   | TtsStart
   | TtsEnd
   | TtsCleared
+  | ServerInterrupt
   | ServerError
   | ServerGoodbye;
 
@@ -228,6 +245,7 @@ const CLIENT_EVENT_TYPES = new Set<string>([
   'client.hello',
   'auth.anonymous',
   'session.start',
+  'session.extend',
   'audio.start',
   'audio.stop',
   'client.barge_in',
@@ -250,6 +268,7 @@ const SERVER_EVENT_TYPES = new Set<string>([
   'tts.start',
   'tts.end',
   'tts.cleared',
+  'server.interrupt',
   'server.error',
   'server.goodbye',
 ]);

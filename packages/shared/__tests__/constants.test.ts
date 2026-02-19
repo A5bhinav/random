@@ -5,8 +5,9 @@ import {
   AUDIO_CHANNELS,
   AUDIO_CHUNK_MS,
   AUDIO_BYTES_PER_SECOND,
-  TIMER_TOTAL_MS,
   TIMER_WARNING_THRESHOLDS,
+  PACING_CHECK_INTERVAL_MS,
+  PACING_DEBOUNCE_MS,
   PROTOCOL_VERSION,
   WS_BACKPRESSURE_BYTES,
   AUTH_RATE_LIMIT_MAX,
@@ -27,18 +28,21 @@ describe('audio constants consistency', () => {
 });
 
 describe('timer constants', () => {
-  it('total is 180 seconds', () => {
-    expect(TIMER_TOTAL_MS).toBe(180_000);
-  });
-
-  it('warnings are at 60s and 15s', () => {
-    expect(TIMER_WARNING_THRESHOLDS).toEqual([60_000, 15_000]);
-  });
-
-  it('all warning thresholds are less than total', () => {
-    for (const threshold of TIMER_WARNING_THRESHOLDS) {
-      expect(threshold).toBeLessThan(TIMER_TOTAL_MS);
+  it('warning thresholds are in descending order', () => {
+    for (let i = 1; i < TIMER_WARNING_THRESHOLDS.length; i++) {
+      expect(TIMER_WARNING_THRESHOLDS[i]).toBeLessThan(TIMER_WARNING_THRESHOLDS[i - 1]!);
     }
+  });
+
+  it('includes standard 60s and 15s thresholds', () => {
+    expect(TIMER_WARNING_THRESHOLDS).toContain(60_000);
+    expect(TIMER_WARNING_THRESHOLDS).toContain(15_000);
+  });
+});
+
+describe('pacing constants', () => {
+  it('debounce is longer than check interval', () => {
+    expect(PACING_DEBOUNCE_MS).toBeGreaterThan(PACING_CHECK_INTERVAL_MS);
   });
 });
 

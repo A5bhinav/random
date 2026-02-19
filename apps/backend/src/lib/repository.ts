@@ -1,5 +1,6 @@
 import { getSupabase } from './supabase.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import type { ContentChunk } from '@coach/shared';
 
 /**
  * Thin persistence layer over Supabase.
@@ -20,6 +21,58 @@ function db(): SupabaseClient | null {
   } catch {
     return null;
   }
+}
+
+// ── content_packs ────────────────────────────────────────────────────────────
+
+export interface InsertContentPackParams {
+  contentId: string;
+  userId: string;
+  filename: string;
+  mimeType: string;
+  chunks: ContentChunk[];
+}
+
+export interface ContentPackRow {
+  id: string;
+  user_id: string;
+  filename: string;
+  mime_type: string;
+  chunks: ContentChunk[];
+  created_at: string;
+}
+
+/** Insert a parsed content pack. Throws on failure — callers must handle. */
+export async function insertContentPack(params: InsertContentPackParams): Promise<void> {
+  const client = db();
+  if (!client) throw new Error('Supabase client not initialised');
+  const { error } = await client
+    .from('content_packs')
+    .insert({
+      id: params.contentId,
+      user_id: params.userId,
+      filename: params.filename,
+      mime_type: params.mimeType,
+      chunks: params.chunks,
+    });
+  if (error) throw new Error(`insertContentPack failed: ${error.message}`);
+}
+
+/** Fetch a content pack by ID. Returns null if not found. Throws on DB error. */
+export async function getContentPack(contentId: string): Promise<ContentPackRow | null> {
+  const client = db();
+  if (!client) throw new Error('Supabase client not initialised');
+  const { data, error } = await client
+    .from('content_packs')
+    .select('*')
+    .eq('id', contentId)
+    .single();
+  if (error) {
+    // PostgREST returns code PGRST116 when no row found
+    if (error.code === 'PGRST116') return null;
+    throw new Error(`getContentPack failed: ${error.message}`);
+  }
+  return data as ContentPackRow;
 }
 
 // ── users ───────────────────────────────────────────────────────────────────
@@ -43,7 +96,7 @@ export async function ensureUserProfile(userId: string): Promise<void> {
 export interface CreateSessionParams {
   sessionId: string;
   userId: string;
-  drillId: string;
+  contentId: string;
   requestedDurationMs: number;
 }
 
@@ -56,7 +109,7 @@ export async function createSession(params: CreateSessionParams): Promise<void> 
       .insert({
         id: params.sessionId,
         user_id: params.userId,
-        drill_id: params.drillId,
+        content_id: params.contentId,
         requested_duration_ms: params.requestedDurationMs,
         status: 'running',
       });
@@ -114,6 +167,26 @@ export async function insertSessionEvent(
     if (error) log('insertSessionEvent failed', { sessionId, type, error: error.message });
   } catch (err) {
     log('insertSessionEvent threw', { sessionId, type, err: String(err) });
+  }
+}
+
+export interface SessionEventRow {
+  session_id: string;
+  ts_ms: number;
+  type: string;
+  payload: Record<string, unknown>;
+}
+
+/** Batch insert multiple session events in one call. */
+export async function insertSessionEvents(events: SessionEventRow[]): Promise<void> {
+  if (events.length === 0) return;
+  const client = db();
+  if (!client) return;
+  try {
+    const { error } = await client.from('session_events').insert(events);
+    if (error) log('insertSessionEvents failed', { count: events.length, error: error.message });
+  } catch (err) {
+    log('insertSessionEvents threw', { count: events.length, err: String(err) });
   }
 }
 

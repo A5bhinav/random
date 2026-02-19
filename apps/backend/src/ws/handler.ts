@@ -3,7 +3,6 @@ import type { WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import {
   PROTOCOL_VERSION,
-  TIMER_TOTAL_MS,
   ErrorCode,
   HEARTBEAT_TIMEOUT_MS,
   AUDIO_FRAME_MAX_BYTES,
@@ -12,22 +11,31 @@ import {
   type ClientHello,
   type AuthAnonymous,
   type SessionStart,
+  type SessionExtend,
 } from '@coach/shared';
 import { verifySupabaseToken } from '../auth/token.js';
 import { ConnectionPhase, ConnectionState } from './connection-state.js';
 import { validateClientMessage } from './validator.js';
 import { sendEvent, sendError } from './helpers.js';
-import { SessionTimer } from '../orchestrator/timer.js';
-import { PITCH_3MIN_DEFAULT_PLAN } from '@coach/shared';
-import { ensureUserProfile, createSession, endSession } from '../lib/repository.js';
+import { ensureUserProfile, createSession } from '../lib/repository.js';
+import { SessionOrchestrator } from '../orchestrator/session.js';
+import type { AdapterFactory } from '../adapters/factory.js';
 
 interface HandlerDeps {
   jwtSecret: string;
-  logger: { info: (...args: unknown[]) => void; warn: (...args: unknown[]) => void; error: (...args: unknown[]) => void };
+  factory: AdapterFactory | null;
+  logger: {
+    info: (...args: unknown[]) => void;
+    warn: (...args: unknown[]) => void;
+    error: (...args: unknown[]) => void;
+  };
 }
 
 // Active sessions keyed by connectionId
-const sessionMap = new Map<string, { timer: SessionTimer; connState: ConnectionState; startTs: number }>();
+const sessionMap = new Map<
+  string,
+  { orchestrator: SessionOrchestrator; connState: ConnectionState }
+>();
 
 export async function registerWSHandler(app: FastifyInstance, deps: HandlerDeps) {
   app.get('/v1/ws', { websocket: true }, (socket: WebSocket, _req) => {
@@ -44,7 +52,6 @@ export async function registerWSHandler(app: FastifyInstance, deps: HandlerDeps)
       payload: { protocol_version: PROTOCOL_VERSION, connection_id: connectionId },
     });
 
-    // Start heartbeat timeout
     const resetHeartbeat = () => {
       if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
       heartbeatTimeout = setTimeout(() => {
@@ -57,14 +64,12 @@ export async function registerWSHandler(app: FastifyInstance, deps: HandlerDeps)
     socket.on('message', (data, isBinary) => {
       resetHeartbeat();
 
-      // Binary frame handling
       if (isBinary) {
         const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
         handleBinaryFrame(socket, connState, buf, deps);
         return;
       }
 
-      // JSON message
       const raw = Buffer.isBuffer(data) ? data.toString('utf8') : String(data);
       const result = validateClientMessage(raw);
       if (!result.valid) {
@@ -72,10 +77,8 @@ export async function registerWSHandler(app: FastifyInstance, deps: HandlerDeps)
         return;
       }
 
-      const event = result.event;
-
       try {
-        routeEvent(socket, connState, event, deps);
+        routeEvent(socket, connState, result.event, deps);
       } catch (err) {
         deps.logger.error({ connectionId, err }, 'Error routing event');
         sendError(
@@ -118,30 +121,45 @@ function routeEvent(
       handleSessionStart(socket, connState, event as unknown as SessionStart, deps);
       break;
 
-    case 'client.ping':
-      // Heartbeat already reset above, no-op
+    case 'session.extend': {
+      connState.expectMinPhase(ConnectionPhase.SESSION_ACTIVE, 'session.extend');
+      const session = sessionMap.get(connState.connectionId);
+      if (!session) {
+        sendError(socket, connState.sessionId ?? '', ErrorCode.ERR_SESSION_STATE, 'No active session');
+        break;
+      }
+      const extend = event as unknown as SessionExtend;
+      session.orchestrator.handleExtend(extend.payload.extra_ms);
       break;
+    }
+
+    case 'client.ping':
+      break; // heartbeat already reset above
 
     case 'client.barge_in':
       connState.expectMinPhase(ConnectionPhase.SESSION_ACTIVE, 'client.barge_in');
-      // Barge-in logic will be wired in Milestone 5
-      deps.logger.info({ connectionId: connState.connectionId }, 'Barge-in received (not yet wired)');
+      sessionMap.get(connState.connectionId)?.orchestrator.handleBargeIn();
       break;
 
     case 'audio.start':
       connState.expectMinPhase(ConnectionPhase.SESSION_ACTIVE, 'audio.start');
       connState.audioStarted = true;
-      deps.logger.info({ connectionId: connState.connectionId }, 'Audio started');
+      sessionMap.get(connState.connectionId)?.orchestrator.handleAudioStart();
       break;
 
     case 'audio.stop':
       connState.expectMinPhase(ConnectionPhase.SESSION_ACTIVE, 'audio.stop');
       connState.audioStarted = false;
-      deps.logger.info({ connectionId: connState.connectionId }, 'Audio stopped');
+      sessionMap.get(connState.connectionId)?.orchestrator.handleAudioStop();
       break;
 
     default:
-      sendError(socket, connState.sessionId ?? '', ErrorCode.ERR_BAD_EVENT_SCHEMA, `Unhandled event type: ${event.type}`);
+      sendError(
+        socket,
+        connState.sessionId ?? '',
+        ErrorCode.ERR_BAD_EVENT_SCHEMA,
+        `Unhandled event type: ${event.type}`,
+      );
   }
 }
 
@@ -183,9 +201,7 @@ async function handleAuth(
       payload: { user_id: claims.sub },
     });
 
-    // Ensure user profile exists in DB (fire-and-forget)
     ensureUserProfile(claims.sub).catch(() => {});
-
     deps.logger.info({ connectionId: connState.connectionId, userId: claims.sub }, 'Authenticated');
   } catch (err) {
     sendEvent(socket, {
@@ -209,70 +225,59 @@ function handleSessionStart(
   connState.sessionId = sessionId;
   connState.phase = ConnectionPhase.SESSION_ACTIVE;
 
-  const durationMs = event.payload.requested_duration_ms || TIMER_TOTAL_MS;
+  const durationMs = event.payload.requested_duration_ms;
   const startTs = Date.now();
 
-  // Send session.start_ack
+  // Send ack immediately (before async init)
   sendEvent(socket, {
     type: 'session.start_ack',
     session_id: sessionId,
     payload: { session_id: sessionId, duration_ms: durationMs, start_ts: startTs },
   });
 
-  // Persist session to DB (fire-and-forget)
+  // Persist session row to DB (fire-and-forget)
   if (connState.userId) {
     createSession({
       sessionId,
       userId: connState.userId,
-      drillId: event.payload.drill_id,
+      contentId: event.payload.content_id,
       requestedDurationMs: durationMs,
     }).catch(() => {});
   }
 
-  // Send session.plan (static fallback for now, LLM generation in Milestone 4)
-  sendEvent(socket, {
-    type: 'session.plan',
-    session_id: sessionId,
-    payload: { plan: PITCH_3MIN_DEFAULT_PLAN },
+  // Build send/sendBinary callbacks bound to this socket
+  const send = (ev: Omit<BaseEvent, 'event_id' | 'ts_ms'>) => sendEvent(socket, ev);
+  const sendBinary = (buf: Buffer) => {
+    if (socket.readyState === 1 /* OPEN */) socket.send(buf);
+  };
+
+  // Provide a logger shim compatible with OrchestratorLogger
+  const logger = {
+    info: (obj: Record<string, unknown>, msg: string) =>
+      deps.logger.info({ ...obj }, msg),
+    warn: (obj: Record<string, unknown>, msg: string) =>
+      deps.logger.warn({ ...obj }, msg),
+    error: (obj: Record<string, unknown>, msg: string) =>
+      deps.logger.error({ ...obj }, msg),
+  };
+
+  // Use a stub factory in test / when factory is null
+  const factory = deps.factory ?? createStubFactory();
+
+  const orchestrator = new SessionOrchestrator({
+    sessionId,
+    userId: connState.userId ?? '',
+    contentId: event.payload.content_id,
+    durationMs,
+    startTs,
+    factory,
+    send,
+    sendBinary,
+    logger,
   });
 
-  // Start timer
-  const timer = new SessionTimer(durationMs, {
-    onTick: (remainingMs) => {
-      sendEvent(socket, {
-        type: 'timer.tick',
-        session_id: sessionId,
-        payload: { remaining_ms: remainingMs, segment_name: 'pitch' },
-      });
-    },
-    onWarning: (remainingMs) => {
-      const seconds = Math.round(remainingMs / 1000);
-      sendEvent(socket, {
-        type: 'timer.warning',
-        session_id: sessionId,
-        payload: { remaining_ms: remainingMs, message: `${seconds} seconds remaining` },
-      });
-    },
-    onExpired: () => {
-      const actualMs = Date.now() - startTs;
-      endSession(sessionId, 'ended', actualMs).catch(() => {});
-
-      sendEvent(socket, {
-        type: 'timer.expired',
-        session_id: sessionId,
-        payload: {},
-      });
-      sendEvent(socket, {
-        type: 'server.goodbye',
-        session_id: sessionId,
-        payload: { reason: 'Timer expired' },
-      });
-      socket.close(1000, 'Session ended');
-    },
-  });
-
-  timer.start();
-  sessionMap.set(connState.connectionId, { timer, connState, startTs });
+  sessionMap.set(connState.connectionId, { orchestrator, connState });
+  orchestrator.start();
 
   deps.logger.info({ connectionId: connState.connectionId, sessionId, durationMs }, 'Session started');
 }
@@ -283,7 +288,6 @@ function handleBinaryFrame(
   data: Buffer,
   deps: HandlerDeps,
 ): void {
-  // Binary before audio.start is a protocol violation
   if (!connState.audioStarted) {
     sendError(
       socket,
@@ -295,39 +299,68 @@ function handleBinaryFrame(
     return;
   }
 
-  // Frame size validation
   if (data.length > AUDIO_FRAME_MAX_BYTES) {
-    deps.logger.warn(
-      { connectionId: connState.connectionId, size: data.length },
-      'Audio frame too large, dropped',
-    );
+    deps.logger.warn({ connectionId: connState.connectionId, size: data.length }, 'Audio frame too large, dropped');
     return;
   }
 
   if (data.length > AUDIO_FRAME_WARN_BYTES) {
-    deps.logger.warn(
-      { connectionId: connState.connectionId, size: data.length },
-      'Audio frame larger than target 640 bytes',
-    );
+    deps.logger.warn({ connectionId: connState.connectionId, size: data.length }, 'Audio frame larger than target 640 bytes');
   }
 
-  // Audio routing will be wired in Milestone 3
-  deps.logger.info(
-    { connectionId: connState.connectionId, size: data.length },
-    'Audio frame received',
-  );
+  sessionMap.get(connState.connectionId)?.orchestrator.handleAudioChunk(data);
 }
 
 function cleanup(connectionId: string, heartbeatTimeout: ReturnType<typeof setTimeout> | null): void {
   if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
   const session = sessionMap.get(connectionId);
   if (session) {
-    // Persist abnormal disconnect if session was still running
-    if (session.connState.sessionId && session.connState.phase === ConnectionPhase.SESSION_ACTIVE) {
-      const actualMs = Date.now() - session.startTs;
-      endSession(session.connState.sessionId, 'error', actualMs, 'disconnect').catch(() => {});
-    }
-    session.timer.destroy();
+    session.orchestrator.destroy();
     sessionMap.delete(connectionId);
   }
+}
+
+// ── Stub factory for test/no-factory mode ─────────────────────────────────────
+
+/**
+ * Returns a factory that creates no-op adapters (used in tests and when
+ * API keys are unavailable). The orchestrator's initialize() will exit early
+ * because getContentPack() returns null in test mode.
+ */
+function createStubFactory(): import('../adapters/factory.js').AdapterFactory {
+  const { EventEmitter } = require('node:events') as typeof import('node:events');
+
+  function stubSTT() {
+    const e = new EventEmitter();
+    return Object.assign(e, {
+      connect: async () => {},
+      sendAudio: () => {},
+      finalize: () => {},
+      close: () => {},
+    });
+  }
+
+  function stubTTS() {
+    const e = new EventEmitter();
+    return Object.assign(e, {
+      connect: async () => {},
+      speak: () => {},
+      flush: () => {},
+      clear: async () => {},
+      close: () => {},
+    });
+  }
+
+  const stubLLM = {
+    generatePlan: async () => { throw new Error('stub'); },
+    streamCoachTurn: async function* () { /* no tokens */ },
+    decidePacing: async () => { throw new Error('stub'); },
+    generateScorecard: async () => '',
+  };
+
+  return {
+    createSTTAdapter: () => stubSTT() as unknown as import('../adapters/stt/types.js').STTAdapter,
+    createTTSAdapter: () => stubTTS() as unknown as import('../adapters/tts/types.js').TTSAdapter,
+    getLLMAdapter: () => stubLLM as unknown as import('../adapters/llm/openai.js').OpenAILLMAdapter,
+  };
 }

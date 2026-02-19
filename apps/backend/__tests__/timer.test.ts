@@ -82,9 +82,7 @@ describe('SessionTimer', () => {
     vi.useFakeTimers();
     const warnings: number[] = [];
 
-    // Use 5s total with warnings at 3s and 1s remaining
-    // Default thresholds are 60s and 15s, so use a short timer to test
-    // We'll use 180s total and check the 60s warning
+    // 180s session: thresholds are 120s, 60s, 15s remaining
     const timer = new SessionTimer(180_000, {
       onTick: vi.fn(),
       onWarning: (remaining) => warnings.push(remaining),
@@ -92,15 +90,20 @@ describe('SessionTimer', () => {
     });
     timer.start();
 
-    // Advance to 121s elapsed (59s remaining) -- should trigger 60s warning
-    vi.advanceTimersByTime(121_000);
+    // Advance to 61s elapsed (119s remaining) -- should trigger 120s warning
+    vi.advanceTimersByTime(61_000);
     expect(warnings.length).toBe(1);
-    expect(warnings[0]).toBeLessThanOrEqual(60_000);
+    expect(warnings[0]).toBeLessThanOrEqual(120_000);
+
+    // Advance to 121s elapsed (59s remaining) -- should trigger 60s warning
+    vi.advanceTimersByTime(60_000);
+    expect(warnings.length).toBe(2);
+    expect(warnings[1]).toBeLessThanOrEqual(60_000);
 
     // Advance to 166s elapsed (14s remaining) -- should trigger 15s warning
     vi.advanceTimersByTime(45_000);
-    expect(warnings.length).toBe(2);
-    expect(warnings[1]).toBeLessThanOrEqual(15_000);
+    expect(warnings.length).toBe(3);
+    expect(warnings[2]).toBeLessThanOrEqual(15_000);
 
     timer.destroy();
   });
@@ -116,10 +119,10 @@ describe('SessionTimer', () => {
     });
     timer.start();
 
-    // Pass both warning thresholds
+    // Pass all three warning thresholds (120s, 60s, 15s)
     vi.advanceTimersByTime(170_000);
 
-    expect(warnings.length).toBe(2);
+    expect(warnings.length).toBe(3);
     timer.destroy();
   });
 

@@ -1,11 +1,18 @@
 // Protocol
 export const PROTOCOL_VERSION = '1.0';
 
-// Timer
-export const TIMER_TOTAL_MS = 180_000;
+// Timer -- total duration is always user-specified, not hardcoded
 export const TIMER_TICK_INTERNAL_MS = 100;
 export const TIMER_TICK_CLIENT_MS = 1_000;
-export const TIMER_WARNING_THRESHOLDS = [60_000, 15_000];
+export const TIMER_WARNING_THRESHOLDS = [120_000, 60_000, 15_000]; // 2min, 1min, 15s
+
+// Pacing loop
+export const PACING_CHECK_INTERVAL_MS = 5_000;  // evaluate topic progress every 5s
+export const PACING_DEBOUNCE_MS = 15_000;        // max one server interrupt per 15s
+
+// Content ingestion
+export const MAX_CONTENT_FILE_MB = 20;
+export const CONTENT_CHUNK_CHARS = 1_500;        // target chars per content chunk
 
 // Reconnect
 export const RECONNECT_BACKOFF_MS = [200, 500, 1000, 2000, 5000];
@@ -43,6 +50,9 @@ export const AUDIO_FRAME_WARN_BYTES = 1280; // warn on frames > 40ms
 
 // WS backpressure
 export const WS_BACKPRESSURE_BYTES = 65_536; // 64KB -- drop TTS chunks above this
+
+// Redis
+export const REDIS_SESSION_TTL_S = 900; // 15 minutes
 
 // Rate limiting
 export const AUTH_RATE_LIMIT_MAX = 10;

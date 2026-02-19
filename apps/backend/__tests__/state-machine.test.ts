@@ -54,6 +54,21 @@ describe('session state machine', () => {
       expect(result.newState).toBe(SessionState.WRAPPING);
       expect(result.sideEffects).toContain('clear_tts');
     });
+
+    it('RUNNING_REP stays on session_extend (extend_timer + replan_remaining)', () => {
+      const result = transition(SessionState.RUNNING_REP, 'session_extend');
+      expect(result.newState).toBe(SessionState.RUNNING_REP);
+      expect(result.sideEffects).toContain('extend_timer');
+      expect(result.sideEffects).toContain('replan_remaining');
+    });
+  });
+
+  describe('content_loaded transition', () => {
+    it('CONFIGURING → PLANNING on content_loaded (triggers generate_plan)', () => {
+      const result = transition(SessionState.CONFIGURING, 'content_loaded');
+      expect(result.newState).toBe(SessionState.PLANNING);
+      expect(result.sideEffects).toContain('generate_plan');
+    });
   });
 
   describe('timer_expired', () => {

@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "Coach",
+    "slug": "coach-app",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#1a1a2e"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.coach.app",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Coach needs microphone access to hear your responses during sessions.",
+        "NSDocumentPickerUsageDescription": "Select your PDF or PowerPoint file to start a coaching session."
+      }
+    },
+    "android": {
+      "package": "com.coach.app",
+      "permissions": ["RECORD_AUDIO", "READ_EXTERNAL_STORAGE"]
+    },
+    "plugins": [
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Coach needs microphone access to hear your responses during sessions."
+        }
+      ],
+      "expo-document-picker"
+    ]
+  }
+}

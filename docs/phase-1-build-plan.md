@@ -1,10 +1,10 @@
-# Phase 1 Build Plan: Voice-First Time-Boxed AI Coaching App
+# Phase 1 Build Plan: Voice-First Time-Boxed AI Learning App
 
 ## Context
 
-You're building a B2C voice-first coaching app where users run structured practice reps in short time windows (walking, commuting). The core loop: "I have 3 minutes -- drill me on my investor pitch." Phase 1 proves the real-time audio pipeline works with hard timer enforcement, barge-in, and streaming STT/TTS. Enterprise features come later.
+You're building a B2C voice-first learning app where users upload their own material (PDF, slides) and have a time-boxed Socratic conversation with an AI that grills them on it. The core loop: "I have 10 minutes — quiz me on this chapter." The AI owns the agenda, tracks which topics have been covered, and actively redirects the user to stay on pace. Phase 1 proves the real-time audio pipeline, file ingestion, AI-driven pacing, and server-authoritative timer all work end-to-end. Enterprise features (company-owned content, team analytics) come later.
 
-**Confirmed decisions:** React Native, Deepgram STT+TTS, OpenAI (Structured Outputs), 3-minute investor pitch drill, server-authoritative timer.
+**Confirmed decisions:** React Native, Deepgram STT+TTS, OpenAI (Structured Outputs), user-uploaded PDF/PPTX content, server-authoritative timer, user-specified session duration.
 
 ---
 
@@ -12,65 +12,65 @@ You're building a B2C voice-first coaching app where users run structured practi
 
 1. **Initialize monorepo** -- root `package.json` with workspaces (`apps/*`, `packages/*`), `tsconfig.base.json`, `.env.example`, `.gitignore`, `.nvmrc` (Node 20)
 2. **Shared package scaffold** -- `/packages/shared/` with TypeScript build, barrel exports
-3. **Backend scaffold** -- `/apps/backend/` with Fastify, `ws`, `ioredis`, `pg`, `ajv`, `jose`, `pino`; config loader with env validation
-4. **Mobile scaffold** -- `/apps/mobile/` React Native bare workflow (iOS + Android targets), audio capture/playback native module deps
-5. **Docker Compose** -- `/infra/docker-compose.yml` with Postgres 16, Redis 7, backend service; `/infra/postgres/init.sql` with Phase 1 schema (users, sessions, session_events, transcripts tables + indexes)
+3. **Backend scaffold** -- `/apps/backend/` with Fastify, `@fastify/multipart`, `ws`, `ioredis`, `pg`, `ajv`, `jose`, `pino`, `pdf-parse`, `officeparser`; config loader with env validation
+4. **Mobile scaffold** -- `/apps/mobile/` React Native bare workflow (iOS + Android targets), audio capture/playback native module deps, document picker dep (`react-native-document-picker`)
+5. **Docker Compose** -- `/infra/docker-compose.yml` with Postgres 16, Redis 7, backend service; `/infra/postgres/init.sql` with Phase 1 schema (users, content_packs, sessions, session_events, transcripts tables + indexes)
 6. **Doc stubs** -- `/docs/PROTOCOL.md`, `ARCHITECTURE.md`, `RUNBOOK.md`
 
 ## Group 2: Shared Types, Schemas, Validation
 
-7. **WebSocket event types** -- `/packages/shared/src/types/events.ts`: discriminated unions for all client/server events, type guards
-8. **Domain types** -- `session.ts` (SessionPlan, SessionState enum, PacingDecision), `audio.ts` (AudioConfig), `errors.ts` (ErrorCode enum)
-9. **JSON Schemas + Ajv validators** -- `/packages/shared/src/schemas/`: session-start, audio-start, session-plan, pacing-decision, event-envelope; compiled Ajv validators
-10. **Constants + drill definitions** -- protocol version, timer constants (180s, warnings at 60s/15s), audio defaults, `PITCH_3MIN_DRILL` definition, `PITCH_3MIN_DEFAULT_PLAN` static template
-11. **Shared package tests** -- schema validation tests (valid/invalid payloads)
+7. **WebSocket event types** -- `/packages/shared/src/types/events.ts`: update `session.start` payload (`content_id` replaces `drill_id`); add `session.extend` client event (`extra_ms`); add `server.interrupt` server event (`reason: 'off_topic' | 'time_pressure' | 'move_on'`, `message`); all other events unchanged
+8. **Domain types** -- `session.ts`: keep `SessionPlan`, `SessionState`, `PacingDecision` (already has `off_topic`/`too_slow` reasons); add `ContentPack` type (content_id, filename, chunks); add `TopicCoverage` type (topic index, status: `pending | active | done | skipped`); extend `LiveSessionState` with `topics_coverage: TopicCoverage[]` and `current_topic_index`
+9. **JSON Schemas + Ajv validators** -- `/packages/shared/src/schemas/`: update session-start (content_id, no drill_id); add session-extend schema; keep audio-start, event-envelope, pacing-decision schemas unchanged
+10. **Constants** -- remove `TIMER_TOTAL_MS` hardcoded constant (duration is always user-specified); remove `PITCH_3MIN_DRILL` and `PITCH_3MIN_DEFAULT_PLAN`; add `PACING_CHECK_INTERVAL_MS = 5000`, `PACING_DEBOUNCE_MS = 15000`, `MAX_CONTENT_FILE_MB = 20`, `CONTENT_CHUNK_CHARS = 1500`; keep all audio/heartbeat/Deepgram/Redis constants
+11. **Shared package tests** -- update schema tests: session-start with content_id, session-extend, server.interrupt; remove pitch drill schema tests
 
 ## Group 3: Backend Core -- HTTP, Auth, Database
 
-12. **Fastify server** -- `/apps/backend/src/server.ts`: plugins, graceful shutdown, structured error handling
-13. **Database layer** -- pg pool, queries for users (findOrCreateAnonymous), sessions (create/end/get), events (batch insert every 500ms), transcripts
-14. **Redis layer** -- ioredis client, `LiveSessionState` typed store with 15min TTL, get/set/delete/refresh
-15. **Auth** -- JWT creation/verification with `jose`; `POST /v1/auth/anonymous` endpoint (device_id -> token)
-16. **HTTP endpoints** -- `/healthz`, `/readyz` (DB+Redis ping), `GET /v1/drills`, `GET /v1/sessions/:id`
-17. **Route registration** -- auth middleware for protected routes
+12. **Fastify server** -- `/apps/backend/src/server.ts`: register `@fastify/multipart` for file upload; rest unchanged (plugins, graceful shutdown, structured error handling)
+13. **Database layer** -- add `content_packs` table (content_id UUID, user_id, filename, mime_type, chunks JSONB array, created_at); update sessions table (`content_id` replaces `drill_id`); add content queries: `insertContentPack`, `getContentPack`; keep all existing session/event/transcript queries
+14. **Redis layer** -- unchanged; `LiveSessionState` gains `topics_coverage` and `current_topic_index` fields
+15. **Auth** -- unchanged; `POST /v1/auth/anonymous` endpoint (device_id -> token)
+16. **HTTP endpoints** -- remove `GET /v1/drills`; add `POST /v1/content` (multipart file upload: parse PDF/PPTX, chunk text, store in DB, return `content_id`); keep `/healthz`, `/readyz`, `GET /v1/sessions/:id`
+17. **Route registration** -- auth middleware for protected routes; `POST /v1/content` requires auth
 
 ## Group 4: Provider Adapters
 
-18. **STT adapter (Deepgram)** -- `/apps/backend/src/adapters/stt/deepgram.ts`: WebSocket to `wss://api.deepgram.com/v1/listen` with `interim_results=true`, `endpointing=500`, `utterance_end_ms=1000`; emits partial/final/utterance_end events; latency timestamps
-19. **TTS adapter (Deepgram)** -- `/apps/backend/src/adapters/tts/deepgram.ts`: WebSocket to `wss://api.deepgram.com/v1/speak` with Speak/Flush/Clear messages; `clear()` returns Promise resolving on Cleared confirmation; audio chunks emitted as events
-20. **TTS text chunker** -- `/apps/backend/src/adapters/tts/chunker.ts`: buffers LLM tokens, emits complete sentences (split on `.!?` + space); critical for Deepgram TTS prosody quality
-21. **LLM adapter (OpenAI)** -- `/apps/backend/src/adapters/llm/openai.ts`: Structured Outputs for plan generation + pacing decisions; streaming for coach turns; retry (2x) + fallback to static plan
-22. **LLM prompts** -- `/apps/backend/src/adapters/llm/prompts.ts`: system prompts for session plan, coach turn (2-3 sentences max), pacing decision, opening, feedback
-23. **Adapter factory** -- config-driven factory, reads provider names from env
+18. **STT adapter (Deepgram)** -- unchanged: WebSocket to `wss://api.deepgram.com/v1/listen` with `interim_results=true`, `endpointing=500`, `utterance_end_ms=1000`; emits partial/final/utterance_end events; latency timestamps
+19. **TTS adapter (Deepgram)** -- unchanged: WebSocket to `wss://api.deepgram.com/v1/speak` with Speak/Flush/Clear messages; `clear()` returns Promise resolving on Cleared confirmation; audio chunks emitted as events
+20. **TTS text chunker** -- unchanged: buffers LLM tokens, emits complete sentences (split on `.!?` + space)
+21. **LLM adapter (OpenAI)** -- unchanged pipeline: Structured Outputs for plan/pacing, streaming for coach turns; retry (2x) + fallback; now passes content chunks as context in all calls
+22. **LLM prompts** -- rewrite all prompts for content-based sessions: (a) **plan prompt**: given content chunks + duration, generate topic-by-topic agenda with time budgets; (b) **coach turn prompt**: Socratic mode -- ask a question, probe the user's answer, max 2 sentences; (c) **pacing prompt**: given topics done/remaining + time left, decide whether to redirect, move on, or compress; (d) **scorecard prompt**: topic-by-topic coverage summary, weak spots, recommended next session; fallback plan = cover all topics evenly
+23. **Adapter factory** -- unchanged: config-driven factory, reads provider names from env
 
 ## Group 5: Session Orchestrator & WebSocket Server
 
-24. **State machine** -- `/apps/backend/src/orchestrator/state-machine.ts`: IDLE -> CONFIGURING -> PLANNING -> BRIEFING -> RUNNING_REP -> WRAPPING -> ENDED; transition table with side effects; throws ERR_SESSION_STATE on illegal transitions
-25. **Timer engine** -- `/apps/backend/src/orchestrator/timer.ts`: wall-clock delta (not interval accumulation), 100ms internal tick, 1Hz client tick, warning callbacks at thresholds, force close on expiry
-26. **Session orchestrator** -- `/apps/backend/src/orchestrator/session.ts`: one instance per session; owns state machine + timer + all adapters; handles audio start/chunk/stop, barge-in, disconnect, resume, timer expiry; coordinates full session lifecycle
-27. **Coach response pipeline** -- `/apps/backend/src/orchestrator/coach-pipeline.ts`: LLM streaming -> text chunker -> TTS Speak -> TTS audio -> client WS binary frames; cancellable on barge-in; records latency timestamps at each stage
-28. **Latency instrumentation** -- `/apps/backend/src/orchestrator/metrics.ts`: per-turn timestamps (audio_stop -> stt_final -> llm_start -> llm_first_token -> tts_first_byte -> sent_to_client); p50/p95 computation; `GET /v1/metrics` endpoint; logs every 60s
-29. **WebSocket handler** -- `/apps/backend/src/ws/handler.ts`: connection lifecycle (hello -> auth -> session.start -> route events to orchestrator); binary frame handling; 15s heartbeat; clean close
-30. **Event validation** -- `/apps/backend/src/ws/validator.ts`: Ajv validation for all incoming events; typed error responses
-31. **Pacing loop** -- `/apps/backend/src/orchestrator/pacing.ts`: every 5s during RUNNING_REP; calls pacing LLM; interrupts if needed; debounce (max once per 15s)
+24. **State machine** -- add `content_loaded` event (CONFIGURING → PLANNING, triggered after content chunks are fetched from DB); add `session_extend` event (RUNNING_REP → RUNNING_REP, side effect: `extend_timer` + `replan_remaining`); keep all existing transitions; add `extend_timer` and `replan_remaining` to `SideEffect` type
+25. **Timer engine** -- add `extend(extra_ms: number)` method that increases the deadline and emits updated tick; rest unchanged (wall-clock delta, 100ms tick, 1Hz client tick, warning callbacks, force close on expiry)
+26. **Session orchestrator** -- on `session.start`: fetch content chunks from DB using `content_id`, pass to plan generation; add handler for `session.extend`: call `timer.extend()` then ask LLM to replan remaining topics; add handler for `server.interrupt` dispatch (called by pacing loop)
+27. **Coach response pipeline** -- unchanged pipeline (LLM streaming -> chunker -> TTS -> client binary frames); all calls now include content chunks in LLM context window
+28. **Latency instrumentation** -- unchanged: per-turn timestamps, p50/p95, `GET /v1/metrics`, logs every 60s
+29. **WebSocket handler** -- add routing for `session.extend` event; add dispatch path for `server.interrupt` server event; rest unchanged (hello -> auth -> session.start -> route to orchestrator, heartbeat, clean close)
+30. **Event validation** -- add Ajv validators for `session.extend` and `server.interrupt`; rest unchanged
+31. **Pacing loop** -- rewrite: every 5s during RUNNING_REP, evaluate (a) topics covered vs. remaining, (b) time-per-remaining-topic budget, (c) semantic relevance of last user transcript to current topic; if off-topic or behind schedule: trigger `server.interrupt` (clear TTS, send redirect message via TTS, dispatch `server.interrupt` event to client); debounce max once per 15s
 
 ## Group 6: Mobile Client
 
-32. **Navigation** -- Home screen + Session screen, React Navigation stack
-33. **WebSocket client** -- `/apps/mobile/src/services/ws-client.ts`: connect/auth/startSession/sendAudio*/sendBargeIn/resume; event emitter; reconnection with exponential backoff
-34. **Auth service** -- device ID from AsyncStorage, POST to `/v1/auth/anonymous`, JWT management
-35. **Audio capture** -- native module wrapper for PCM s16le 16kHz mono 20ms chunks; iOS `playAndRecord`/`voiceChat` session; Android RECORD_AUDIO permission
-36. **Audio playback** -- streaming PCM playback with 200-400ms jitter buffer; `stopPlayback()` drops buffer instantly for barge-in (<150ms target)
-37. **Session screen UI** -- timer countdown, push-to-talk button (press-and-hold), transcript area (partials italic, finals normal, coach text), status indicator, warning banner, earcon sounds
-38. **useSession hook** -- coordinates WS client + audio capture + audio playback + UI state; handles all server events; cleanup on unmount
-39. **Home screen** -- drill display, start button, mic permission request, "not for driving" disclaimer
+32. **Navigation** -- Upload screen + Session screen, React Navigation stack (Home screen becomes Upload screen)
+33. **WebSocket client** -- add `sendExtend(extra_ms)` method; add handler for `server.interrupt` event (stop mic immediately, switch to playback mode); rest unchanged (connect/auth/startSession/sendAudio/sendBargeIn/resume, exponential backoff)
+34. **Auth service** -- unchanged: device ID from AsyncStorage, JWT management
+35. **Audio capture** -- unchanged: PCM s16le 16kHz mono 20ms chunks, iOS/Android native modules
+36. **Audio playback** -- unchanged: 200-400ms jitter buffer, `stopPlayback()` <150ms for barge-in
+37. **Session screen UI** -- timer countdown with extend button (+5 min tap); push-to-talk (press-and-hold); topic progress bar (X of N topics covered); transcript area; status indicator that shows "AI redirecting..." on `server.interrupt`; warning banner at time thresholds; earcon sounds
+38. **useSession hook** -- add: handle `server.interrupt` (stop capture, start playback); handle `session.extend` dispatch; expose topic coverage state for progress bar; handle scorecard payload in WRAPPING; cleanup on unmount
+39. **Upload screen** -- file picker (PDF/PPTX via `react-native-document-picker`); upload to `POST /v1/content` with progress indicator; duration picker (5/10/15/20 min or custom); "Start Session" button once content_id is returned; mic permission request
 
 ## Group 7: Testing & Documentation
 
-40. **Backend unit tests** -- state machine transitions, timer accuracy/warnings/expiry, text chunker sentence splitting, WS validator
-41. **Backend integration tests** -- full WS lifecycle handshake, barge-in triggers TTS clear + no deadlocks on 3x rapid barge-in, timer expiry forces session end + DB persist
-42. **Schema tests** -- all JSON schemas against valid/invalid examples
-43. **Finalize docs** -- PROTOCOL.md (full event catalog with examples, state machine diagram, error codes), ARCHITECTURE.md (system diagram, data flow, component matrix), RUNBOOK.md (local setup, manual QA checklist, troubleshooting)
+40. **Backend unit tests** -- keep: state machine transitions, timer accuracy/warnings/expiry, text chunker, WS validator; add: `timer.extend()` correctness, `session_extend` state machine transition, `server.interrupt` dispatch, topic coverage tracker logic, content chunking output
+41. **Backend integration tests** -- keep: full WS lifecycle handshake, barge-in TTS clear, timer expiry DB persist; add: file upload → parse → chunk → session start flow; server-initiated interrupt mid-user-speech; time extension re-plans remaining topics; scorecard generated on WRAPPING
+42. **Schema tests** -- update: session-start with content_id, session-extend, server.interrupt; remove pitch drill schema tests; keep all audio/envelope/pacing schemas
+43. **Finalize docs** -- PROTOCOL.md: add `session.extend`, `server.interrupt` to event catalog; update state machine diagram; ARCHITECTURE.md: add content ingestion pipeline; RUNBOOK.md: update local setup (file upload flow, manual QA checklist)
 
 ---
 
@@ -79,15 +79,20 @@ You're building a B2C voice-first coaching app where users run structured practi
 | File | Role |
 |------|------|
 | `/packages/shared/src/types/events.ts` | Canonical client-server contract |
-| `/apps/backend/src/orchestrator/session.ts` | Central coordinator: state machine + timer + adapters |
+| `/packages/shared/src/types/session.ts` | `TopicCoverage`, `ContentPack`, `LiveSessionState` |
+| `/apps/backend/src/orchestrator/session.ts` | Central coordinator: state machine + timer + adapters + content |
+| `/apps/backend/src/orchestrator/pacing.ts` | Topic-aware pacing loop + server-initiated interrupt |
 | `/apps/backend/src/ws/handler.ts` | WebSocket connection lifecycle |
 | `/apps/backend/src/adapters/tts/deepgram.ts` | Most latency-sensitive adapter (streaming + barge-in) |
 | `/apps/backend/src/orchestrator/coach-pipeline.ts` | LLM -> chunker -> TTS -> client audio pipeline |
+| `/apps/backend/src/lib/repository.ts` | Content pack storage and retrieval |
 | `/apps/mobile/src/hooks/useSession.ts` | Client-side session orchestration |
+| `/apps/mobile/src/screens/UploadScreen.tsx` | File picker, upload, duration config, session start |
 
 ## Latency Targets
 
-- Barge-in silence: <150ms (client stops playback instantly; server confirms via `tts.cleared`)
+- Server-initiated interrupt to user hearing redirect (p50): <900ms
+- Barge-in silence (user-initiated): <150ms
 - End-of-turn to first TTS byte at client (p50): <900ms
 - End-of-turn to first TTS byte at client (p95): <1800ms
 
@@ -95,12 +100,14 @@ You're building a B2C voice-first coaching app where users run structured practi
 
 1. `docker compose up` starts Postgres, Redis, backend
 2. `GET /healthz` returns 200; `GET /readyz` returns 200
-3. Run mobile on iOS simulator, tap "Start Drill"
-4. Full session: coach speaks intro -> user holds push-to-talk and pitches -> coach responds -> timer counts down -> session ends at 180s
-5. Barge-in: press push-to-talk while coach is speaking -> audio stops instantly -> recording begins
-6. Check `GET /v1/metrics` for p50/p95 latency data
-7. Run `vitest` for backend tests (state machine, timer, schemas, WS lifecycle, barge-in)
-8. Manual QA: timer hard stop, reconnection within 5s, malformed JSON doesn't crash server
+3. Run mobile on iOS simulator, pick a PDF, upload it, set 10-minute duration, tap "Start Session"
+4. Full session: AI speaks opening question -> user holds push-to-talk and answers -> AI probes follow-up -> topics tick off the progress bar -> session ends at time limit with scorecard
+5. Server interrupt: user goes off-topic for 15s -> AI cuts in with redirect -> user hears redirect message, mic stops
+6. Time extension: tap "+5 min" during session -> timer updates -> AI re-plans remaining topics
+7. Barge-in: user-initiated press while AI is speaking -> audio stops instantly -> recording begins
+8. Check `GET /v1/metrics` for p50/p95 latency data
+9. Run `vitest` for backend tests (state machine, timer, topic tracker, schemas, WS lifecycle, server interrupt, time extension)
+10. Manual QA: timer hard stop, malformed JSON doesn't crash server, reconnection within 5s, large PDF (100 pages) doesn't time out upload
 
 
 I've added three comprehensive appendices to the plan file with all research findings:

@@ -42,3 +42,49 @@ export interface WordTimestamp {
   end: number;
   confidence: number;
 }
+
+/** A parsed chunk of user-uploaded content (PDF/PPTX). */
+export interface ContentChunk {
+  index: number;
+  text: string;
+  char_count: number;
+}
+
+/** Metadata and parsed content from a user-uploaded file. */
+export interface ContentPack {
+  content_id: string;
+  user_id: string;
+  filename: string;
+  mime_type: string;
+  chunks: ContentChunk[];
+  created_at: string;
+}
+
+/** Per-topic coverage state tracked during a session. */
+export interface TopicCoverage {
+  /** Index into SessionPlan.segments */
+  segment_index: number;
+  segment_id: string;
+  status: 'pending' | 'active' | 'done' | 'skipped';
+  /** ISO timestamp when the topic became active */
+  started_at?: string;
+  /** ISO timestamp when the topic was marked done or skipped */
+  ended_at?: string;
+}
+
+/** Serializable session state cached in Redis (15-min TTL). */
+export interface LiveSessionState {
+  session_id: string;
+  user_id: string;
+  content_id: string;
+  state: SessionState;
+  plan: SessionPlan | null;
+  start_ts: number;
+  elapsed_ms: number;
+  current_segment_index: number;
+  current_topic_index: number;
+  topics_coverage: TopicCoverage[];
+  turn_index: number;
+  last_client_audio_seq: number;
+  last_server_tts_seq: number;
+}

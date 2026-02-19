@@ -27,8 +27,8 @@ describe('validateClientMessage', () => {
 
   it('accepts valid session.start', () => {
     const msg = validEnvelope('session.start', {
-      requested_duration_ms: 180000,
-      drill_id: 'pitch_3min_v1',
+      requested_duration_ms: 600_000,
+      content_id: 'cnt_abc123',
     });
     const result = validateClientMessage(msg);
     expect(result.valid).toBe(true);

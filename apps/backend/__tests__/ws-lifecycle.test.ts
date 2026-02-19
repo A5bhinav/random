@@ -154,23 +154,20 @@ describe('WS lifecycle integration', () => {
 
     // Send session.start
     c.send(makeEvent('session.start', {
-      requested_duration_ms: 180000,
-      drill_id: 'pitch_3min_v1',
+      requested_duration_ms: 600_000,
+      content_id: 'cnt_abc123',
     }));
 
     // Receive session.start_ack
     const ack = parseEvent(await c.nextMessage());
     expect(ack.type).toBe('session.start_ack');
 
-    // Receive session.plan
-    const plan = parseEvent(await c.nextMessage());
-    expect(plan.type).toBe('session.plan');
-    expect(plan.payload.plan.segments).toBeDefined();
+    // session.plan will arrive once LLM plan generation is wired (Milestone 4)
 
     return { userId: auth.payload.user_id, sessionId: ack.payload.session_id };
   }
 
-  it('completes full handshake: hello → auth → session.start → plan', async () => {
+  it('completes full handshake: hello → auth → session.start → ack', async () => {
     const c = await connect();
     const { sessionId } = await doHandshake(c);
     expect(sessionId).toBeTruthy();
@@ -183,7 +180,7 @@ describe('WS lifecycle integration', () => {
     // Wait for a timer tick (should arrive within ~1s)
     const tick = parseEvent(await c.nextMessage(3000));
     expect(tick.type).toBe('timer.tick');
-    expect(tick.payload.remaining_ms).toBeLessThanOrEqual(180000);
+    expect(tick.payload.remaining_ms).toBeLessThanOrEqual(600_000);
     expect(tick.payload.remaining_ms).toBeGreaterThan(0);
   });
 

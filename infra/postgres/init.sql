@@ -42,19 +42,56 @@ CREATE TRIGGER on_auth_user_created
   FOR EACH ROW
   EXECUTE FUNCTION public.handle_new_user();
 
+-- ── content_packs ────────────────────────────────────────────────────────────
+-- Stores parsed text chunks from user-uploaded PDFs and slide decks.
+-- Must be defined before sessions so the FK reference resolves.
+
+CREATE TABLE IF NOT EXISTS public.content_packs (
+  id UUID PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  filename TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  chunks JSONB NOT NULL DEFAULT '[]',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.content_packs ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS content_packs_select_own ON public.content_packs;
+CREATE POLICY content_packs_select_own ON public.content_packs
+  FOR SELECT USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS content_packs_insert_own ON public.content_packs;
+CREATE POLICY content_packs_insert_own ON public.content_packs
+  FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+CREATE INDEX IF NOT EXISTS idx_content_packs_user ON public.content_packs(user_id);
+
 -- ── sessions ────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS public.sessions (
   id UUID PRIMARY KEY,
   user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  content_id UUID NOT NULL REFERENCES public.content_packs(id) ON DELETE RESTRICT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   ended_at TIMESTAMPTZ NULL,
-  drill_id TEXT NOT NULL,
   requested_duration_ms INT NOT NULL,
   actual_duration_ms INT NULL,
   status TEXT NOT NULL CHECK (status IN ('running','ended','error')),
   error_code TEXT NULL
 );
+
+-- Migration: rename drill_id → content_id if upgrading from an older schema.
+-- Safe to run repeatedly; no-ops when the column doesn't exist.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'sessions' AND column_name = 'drill_id'
+  ) THEN
+    ALTER TABLE public.sessions DROP COLUMN drill_id;
+  END IF;
+END$$;
 
 ALTER TABLE public.sessions ENABLE ROW LEVEL SECURITY;
 

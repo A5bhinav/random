@@ -85,6 +85,7 @@ describe('clientPayloadValidators map', () => {
       'client.hello',
       'auth.anonymous',
       'session.start',
+      'session.extend',
       'audio.start',
       'audio.stop',
       'client.barge_in',

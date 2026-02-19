@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   validateEventEnvelope,
   validateSessionStartPayload,
+  validateSessionExtendPayload,
+  validateServerInterruptPayload,
   validateAudioStartPayload,
   validateSessionPlan,
   validatePacingDecision,
@@ -54,31 +56,63 @@ describe('eventEnvelope schema', () => {
 
 describe('sessionStartPayload schema', () => {
   it('accepts valid payload', () => {
-    const valid = { requested_duration_ms: 180000, drill_id: 'pitch_3min_v1' };
+    const valid = { requested_duration_ms: 600_000, content_id: 'cnt_abc123' };
     expect(validateSessionStartPayload(valid)).toBe(true);
   });
 
   it('accepts payload with optional user_goal', () => {
     const valid = {
-      requested_duration_ms: 180000,
-      drill_id: 'pitch_3min_v1',
-      user_goal: 'Practice my pitch',
+      requested_duration_ms: 600_000,
+      content_id: 'cnt_abc123',
+      user_goal: 'Understand chapter 3',
     };
     expect(validateSessionStartPayload(valid)).toBe(true);
   });
 
-  it('rejects missing drill_id', () => {
-    const invalid = { requested_duration_ms: 180000 };
+  it('rejects missing content_id', () => {
+    const invalid = { requested_duration_ms: 600_000 };
     expect(validateSessionStartPayload(invalid)).toBe(false);
   });
 
   it('rejects extra properties', () => {
-    const invalid = {
-      requested_duration_ms: 180000,
-      drill_id: 'pitch_3min_v1',
-      foo: 'bar',
-    };
+    const invalid = { requested_duration_ms: 600_000, content_id: 'cnt_abc123', foo: 'bar' };
     expect(validateSessionStartPayload(invalid)).toBe(false);
+  });
+});
+
+describe('sessionExtendPayload schema', () => {
+  it('accepts valid payload', () => {
+    expect(validateSessionExtendPayload({ extra_ms: 300_000 })).toBe(true);
+  });
+
+  it('rejects missing extra_ms', () => {
+    expect(validateSessionExtendPayload({})).toBe(false);
+  });
+
+  it('rejects extra properties', () => {
+    expect(validateSessionExtendPayload({ extra_ms: 300_000, foo: 'bar' })).toBe(false);
+  });
+});
+
+describe('serverInterruptPayload schema', () => {
+  it('accepts off_topic reason', () => {
+    expect(validateServerInterruptPayload({ reason: 'off_topic', message: 'Stay on track.' })).toBe(true);
+  });
+
+  it('accepts time_pressure reason', () => {
+    expect(validateServerInterruptPayload({ reason: 'time_pressure', message: 'Only 2 min left.' })).toBe(true);
+  });
+
+  it('accepts move_on reason', () => {
+    expect(validateServerInterruptPayload({ reason: 'move_on', message: "Let's move to the next topic." })).toBe(true);
+  });
+
+  it('rejects unknown reason', () => {
+    expect(validateServerInterruptPayload({ reason: 'bored', message: 'test' })).toBe(false);
+  });
+
+  it('rejects missing message', () => {
+    expect(validateServerInterruptPayload({ reason: 'off_topic' })).toBe(false);
   });
 });
 

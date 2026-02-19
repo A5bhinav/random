@@ -8,6 +8,8 @@ vi.mock('../src/lib/supabase.js', () => ({
 
 import {
   ensureUserProfile,
+  insertContentPack,
+  getContentPack,
   createSession,
   endSession,
   insertSessionEvent,
@@ -34,6 +36,90 @@ describe('repository', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  // ── insertContentPack ───────────────────────────────────────────────
+
+  describe('insertContentPack', () => {
+    it('inserts content pack with correct params', async () => {
+      const chain = mockChain({ error: null });
+
+      await insertContentPack({
+        contentId: 'cnt-1',
+        userId: 'user-1',
+        filename: 'chapter1.pdf',
+        mimeType: 'application/pdf',
+        chunks: [{ index: 0, text: 'Hello world', char_count: 11 }],
+      });
+
+      expect(mockFrom).toHaveBeenCalledWith('content_packs');
+      expect(chain.insert).toHaveBeenCalledWith({
+        id: 'cnt-1',
+        user_id: 'user-1',
+        filename: 'chapter1.pdf',
+        mime_type: 'application/pdf',
+        chunks: [{ index: 0, text: 'Hello world', char_count: 11 }],
+      });
+    });
+
+    it('throws on DB error', async () => {
+      mockChain({ error: { message: 'unique violation' } });
+
+      await expect(
+        insertContentPack({
+          contentId: 'cnt-1',
+          userId: 'user-1',
+          filename: 'test.pdf',
+          mimeType: 'application/pdf',
+          chunks: [],
+        }),
+      ).rejects.toThrow('insertContentPack failed');
+    });
+  });
+
+  // ── getContentPack ──────────────────────────────────────────────────
+
+  describe('getContentPack', () => {
+    it('returns content pack when found', async () => {
+      const row = {
+        id: 'cnt-1',
+        user_id: 'user-1',
+        filename: 'chapter1.pdf',
+        mime_type: 'application/pdf',
+        chunks: [{ index: 0, text: 'Hello', char_count: 5 }],
+        created_at: '2024-01-01T00:00:00Z',
+      };
+      const single = vi.fn().mockResolvedValue({ data: row, error: null });
+      const eq = vi.fn().mockReturnValue({ single });
+      const select = vi.fn().mockReturnValue({ eq });
+      mockFrom.mockReturnValue({ select });
+
+      const result = await getContentPack('cnt-1');
+
+      expect(mockFrom).toHaveBeenCalledWith('content_packs');
+      expect(select).toHaveBeenCalledWith('*');
+      expect(eq).toHaveBeenCalledWith('id', 'cnt-1');
+      expect(result).toEqual(row);
+    });
+
+    it('returns null when not found (PGRST116)', async () => {
+      const single = vi.fn().mockResolvedValue({ data: null, error: { code: 'PGRST116', message: 'No rows' } });
+      const eq = vi.fn().mockReturnValue({ single });
+      const select = vi.fn().mockReturnValue({ eq });
+      mockFrom.mockReturnValue({ select });
+
+      const result = await getContentPack('cnt-missing');
+      expect(result).toBeNull();
+    });
+
+    it('throws on unexpected DB error', async () => {
+      const single = vi.fn().mockResolvedValue({ data: null, error: { code: '42P01', message: 'table not found' } });
+      const eq = vi.fn().mockReturnValue({ single });
+      const select = vi.fn().mockReturnValue({ eq });
+      mockFrom.mockReturnValue({ select });
+
+      await expect(getContentPack('cnt-1')).rejects.toThrow('getContentPack failed');
+    });
   });
 
   // ── ensureUserProfile ───────────────────────────────────────────────
@@ -67,16 +153,16 @@ describe('repository', () => {
       await createSession({
         sessionId: 'sess-1',
         userId: 'user-1',
-        drillId: 'pitch_3min_v1',
-        requestedDurationMs: 180000,
+        contentId: 'cnt_abc123',
+        requestedDurationMs: 600_000,
       });
 
       expect(mockFrom).toHaveBeenCalledWith('sessions');
       expect(chain.insert).toHaveBeenCalledWith({
         id: 'sess-1',
         user_id: 'user-1',
-        drill_id: 'pitch_3min_v1',
-        requested_duration_ms: 180000,
+        content_id: 'cnt_abc123',
+        requested_duration_ms: 600_000,
         status: 'running',
       });
     });
@@ -88,8 +174,8 @@ describe('repository', () => {
         createSession({
           sessionId: 'sess-1',
           userId: 'user-1',
-          drillId: 'drill',
-          requestedDurationMs: 60000,
+          contentId: 'cnt_abc123',
+          requestedDurationMs: 600_000,
         }),
       ).resolves.toBeUndefined();
     });

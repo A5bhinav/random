@@ -8,10 +8,32 @@ export const sessionStartPayloadSchema = {
   type: 'object' as const,
   properties: {
     requested_duration_ms: { type: 'number' as const },
-    drill_id: { type: 'string' as const },
+    content_id: { type: 'string' as const },
     user_goal: { type: 'string' as const, nullable: true as const },
   },
-  required: ['requested_duration_ms', 'drill_id'] as const,
+  required: ['requested_duration_ms', 'content_id'] as const,
+  additionalProperties: false,
+};
+
+export const sessionExtendPayloadSchema = {
+  type: 'object' as const,
+  properties: {
+    extra_ms: { type: 'number' as const },
+  },
+  required: ['extra_ms'] as const,
+  additionalProperties: false,
+};
+
+export const serverInterruptPayloadSchema = {
+  type: 'object' as const,
+  properties: {
+    reason: {
+      type: 'string' as const,
+      enum: ['off_topic', 'time_pressure', 'move_on'] as const,
+    },
+    message: { type: 'string' as const },
+  },
+  required: ['reason', 'message'] as const,
   additionalProperties: false,
 };
 
