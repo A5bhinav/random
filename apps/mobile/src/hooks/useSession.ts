@@ -1,4 +1,5 @@
 import { useEffect, useReducer, useRef, useCallback } from 'react';
+import { Audio } from 'expo-av';
 import type { SessionPlan } from '@coach/shared';
 import { WSClient } from '../services/wsClient';
 import { startCapture, stopCapture } from '../services/audioCapture';
@@ -44,6 +45,7 @@ const initialState: SessionState = {
 
 type Action =
   | { type: 'AUTH_OK' }
+  | { type: 'DISCONNECTED' }
   | { type: 'SESSION_STARTED'; durationMs: number }
   | { type: 'PLAN'; plan: SessionPlan }
   | { type: 'TICK'; remainingMs: number; segmentName: string }
@@ -108,6 +110,10 @@ function reducer(state: SessionState, action: Action): SessionState {
     case 'INTERRUPT_DONE':
       return { ...state, isInterrupting: false };
 
+    case 'DISCONNECTED':
+      // Show "Connecting…" overlay; wsClient will auto-reconnect
+      return { ...state, phase: 'connecting', isAISpeaking: false, isUserSpeaking: false };
+
     case 'ENDED':
       return { ...state, phase: 'ended', isAISpeaking: false, isUserSpeaking: false };
 
@@ -143,102 +149,128 @@ export function useSession(
   const interruptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    void initPlayback();
+    let cancelled = false;
 
-    const client = new WSClient();
-    clientRef.current = client;
+    const setup = async () => {
+      const { granted } = await Audio.requestPermissionsAsync();
+      if (!granted) {
+        dispatch({ type: 'ERROR', message: 'Microphone permission is required.' });
+        return;
+      }
+      if (cancelled) return;
+      await initPlayback();
+      if (cancelled) return;
+      start();
+    };
 
-    const unsubs: Array<() => void> = [];
+    const start = () => {
+      const client = new WSClient();
+      clientRef.current = client;
 
-    unsubs.push(
-      client.on('auth.ok', () => {
-        dispatch({ type: 'AUTH_OK' });
-        // Start the session immediately after authentication
-        client.startSession(contentId, durationMs);
-      }),
-    );
+      const unsubs: Array<() => void> = [];
 
-    unsubs.push(
-      client.on<{ session_id: string; duration_ms: number }>('session.start_ack', (p) => {
-        dispatch({ type: 'SESSION_STARTED', durationMs: p.duration_ms });
-      }),
-    );
+      unsubs.push(
+        client.on('auth.ok', () => {
+          dispatch({ type: 'AUTH_OK' });
+          // Start the session immediately after authentication
+          client.startSession(contentId, durationMs);
+        }),
+      );
 
-    unsubs.push(
-      client.on<{ plan: SessionPlan }>('session.plan', (p) => {
-        dispatch({ type: 'PLAN', plan: p.plan });
-      }),
-    );
+      unsubs.push(
+        client.on<{ session_id: string; duration_ms: number }>('session.start_ack', (p) => {
+          dispatch({ type: 'SESSION_STARTED', durationMs: p.duration_ms });
+        }),
+      );
 
-    unsubs.push(
-      client.on<{ remaining_ms: number; segment_name: string }>('timer.tick', (p) => {
-        dispatch({ type: 'TICK', remainingMs: p.remaining_ms, segmentName: p.segment_name });
-      }),
-    );
+      unsubs.push(
+        client.on<{ plan: SessionPlan }>('session.plan', (p) => {
+          dispatch({ type: 'PLAN', plan: p.plan });
+        }),
+      );
 
-    unsubs.push(client.on('tts.start', () => dispatch({ type: 'TTS_START' })));
-    unsubs.push(client.on('tts.end', () => dispatch({ type: 'TTS_END' })));
-    unsubs.push(client.on('tts.cleared', () => dispatch({ type: 'TTS_CLEARED' })));
+      unsubs.push(
+        client.on<{ remaining_ms: number; segment_name: string }>('timer.tick', (p) => {
+          dispatch({ type: 'TICK', remainingMs: p.remaining_ms, segmentName: p.segment_name });
+        }),
+      );
 
-    unsubs.push(
-      client.on<{ text: string }>('stt.partial', (p) => {
-        dispatch({ type: 'STT_PARTIAL', text: p.text });
-      }),
-    );
+      unsubs.push(client.on('tts.start', () => dispatch({ type: 'TTS_START' })));
+      unsubs.push(client.on('tts.end', () => dispatch({ type: 'TTS_END' })));
+      unsubs.push(client.on('tts.cleared', () => dispatch({ type: 'TTS_CLEARED' })));
 
-    unsubs.push(client.on('stt.final', () => dispatch({ type: 'STT_FINAL' })));
+      unsubs.push(
+        client.on<{ text: string }>('stt.partial', (p) => {
+          dispatch({ type: 'STT_PARTIAL', text: p.text });
+        }),
+      );
 
-    unsubs.push(
-      client.on<{ text: string; turn_type: string }>('coach.text', (p) => {
-        dispatch({ type: 'COACH_TEXT', text: p.text, turnType: p.turn_type });
-      }),
-    );
+      unsubs.push(client.on('stt.final', () => dispatch({ type: 'STT_FINAL' })));
 
-    unsubs.push(
-      client.on<{ reason: string; message: string }>('server.interrupt', (p) => {
-        dispatch({ type: 'INTERRUPT', message: p.message });
-        // Stop any ongoing capture so the user doesn't accidentally send audio
-        stopCapture();
-        void stopPlayback();
-        // Clear the interrupt banner after 3 s (the AI will speak the message via TTS)
-        if (interruptTimerRef.current) clearTimeout(interruptTimerRef.current);
-        interruptTimerRef.current = setTimeout(
-          () => dispatch({ type: 'INTERRUPT_DONE' }),
-          3000,
-        );
-      }),
-    );
+      unsubs.push(
+        client.on<{ text: string; turn_type: string }>('coach.text', (p) => {
+          dispatch({ type: 'COACH_TEXT', text: p.text, turnType: p.turn_type });
+        }),
+      );
 
-    unsubs.push(
-      client.on<ArrayBuffer>('binary', (data) => {
-        pushPCM(data);
-      }),
-    );
+      unsubs.push(
+        client.on<{ reason: string; message: string }>('server.interrupt', (p) => {
+          dispatch({ type: 'INTERRUPT', message: p.message });
+          // Stop any ongoing capture so the user doesn't accidentally send audio
+          stopCapture();
+          void stopPlayback();
+          // Clear the interrupt banner after 3 s (the AI will speak the message via TTS)
+          if (interruptTimerRef.current) clearTimeout(interruptTimerRef.current);
+          interruptTimerRef.current = setTimeout(
+            () => dispatch({ type: 'INTERRUPT_DONE' }),
+            3000,
+          );
+        }),
+      );
 
-    unsubs.push(
-      client.on('timer.expired', () => {
-        stopCapture();
-        void stopPlayback();
-        dispatch({ type: 'ENDED' });
-      }),
-    );
+      unsubs.push(
+        client.on<ArrayBuffer>('binary', (data) => {
+          pushPCM(data);
+        }),
+      );
 
-    unsubs.push(client.on('server.goodbye', () => dispatch({ type: 'ENDED' })));
+      unsubs.push(
+        client.on('timer.expired', () => {
+          stopCapture();
+          void stopPlayback();
+          dispatch({ type: 'ENDED' });
+        }),
+      );
 
-    unsubs.push(
-      client.on<{ code: string; message: string }>('server.error', (p) => {
-        dispatch({ type: 'ERROR', message: p.message });
-      }),
-    );
+      unsubs.push(client.on('server.goodbye', () => dispatch({ type: 'ENDED' })));
 
-    client.connect();
+      unsubs.push(
+        client.on<{ code: string; message: string }>('server.error', (p) => {
+          dispatch({ type: 'ERROR', message: p.message });
+        }),
+      );
+
+      // auth.error means the token was rejected — stop reconnecting and surface the error
+      unsubs.push(
+        client.on<{ message: string }>('auth.error', (p) => {
+          dispatch({ type: 'ERROR', message: p.message ?? 'Authentication failed.' });
+        }),
+      );
+
+      // Show reconnecting overlay while wsClient attempts to re-establish the connection
+      unsubs.push(client.on('disconnected', () => dispatch({ type: 'DISCONNECTED' })));
+
+      client.connect();
+    };
+
+    void setup();
 
     return () => {
-      unsubs.forEach((fn) => fn());
+      cancelled = true;
       if (interruptTimerRef.current) clearTimeout(interruptTimerRef.current);
       stopCapture();
       void stopPlayback();
-      client.destroy();
+      clientRef.current?.destroy();
     };
   }, [contentId, durationMs]);
 

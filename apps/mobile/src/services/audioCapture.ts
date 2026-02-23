@@ -9,7 +9,7 @@
  * (640 bytes) ready to send directly over the WebSocket as a binary frame.
  */
 
-import { AUDIO_SAMPLE_RATE, AUDIO_CHUNK_BYTES } from '@coach/shared';
+import { AUDIO_SAMPLE_RATE, AUDIO_CHANNELS, AUDIO_CHUNK_BYTES } from '@coach/shared';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const LiveAudioStream = require('react-native-live-audio-stream').default as {
@@ -33,7 +33,7 @@ export function startCapture(onChunk: (pcm: ArrayBuffer) => void): void {
 
   LiveAudioStream.init({
     sampleRate: AUDIO_SAMPLE_RATE,
-    channels: 1,
+    channels: AUDIO_CHANNELS,
     bitsPerSample: 16,
     bufferSize: AUDIO_CHUNK_BYTES,
   });

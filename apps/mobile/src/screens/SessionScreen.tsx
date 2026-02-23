@@ -46,7 +46,7 @@ export function SessionScreen({ route, navigation }: Props) {
           ) : (
             <Text style={styles.endedSubtitle}>Great work!</Text>
           )}
-          <TouchableOpacity style={styles.doneBtn} onPress={() => navigation.goBack()}>
+          <TouchableOpacity style={styles.doneBtn} onPress={() => navigation.replace('Upload')}>
             <Text style={styles.doneBtnText}>Done</Text>
           </TouchableOpacity>
         </View>
@@ -62,7 +62,7 @@ export function SessionScreen({ route, navigation }: Props) {
         <View style={styles.endedContainer}>
           <Text style={styles.errorTitle}>Connection Error</Text>
           <Text style={styles.errorMessage}>{session.error ?? 'Something went wrong.'}</Text>
-          <TouchableOpacity style={styles.doneBtn} onPress={() => navigation.goBack()}>
+          <TouchableOpacity style={styles.doneBtn} onPress={() => navigation.replace('Upload')}>
             <Text style={styles.doneBtnText}>Go Back</Text>
           </TouchableOpacity>
         </View>

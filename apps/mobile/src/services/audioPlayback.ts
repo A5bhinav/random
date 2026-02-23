@@ -32,7 +32,7 @@ let currentSound: Audio.Sound | null = null;
 
 export async function initPlayback(): Promise<void> {
   await Audio.setAudioModeAsync({
-    allowsRecordingIOS: false,
+    allowsRecordingIOS: true,   // must be true so recording and playback coexist on iOS
     playsInSilentModeIOS: true,
     staysActiveInBackground: false,
   });
