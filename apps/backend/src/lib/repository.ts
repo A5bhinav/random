@@ -75,6 +75,36 @@ export async function getContentPack(contentId: string): Promise<ContentPackRow 
   return data as ContentPackRow;
 }
 
+// ── sessions (read) ──────────────────────────────────────────────────────────
+
+export interface SessionRow {
+  id: string;
+  user_id: string;
+  content_id: string;
+  status: 'running' | 'ended' | 'error';
+  requested_duration_ms: number;
+  actual_duration_ms: number | null;
+  error_code: string | null;
+  created_at: string;
+  ended_at: string | null;
+}
+
+/** Fetch a single session by ID. Returns null if not found. Throws on DB error. */
+export async function getSession(sessionId: string): Promise<SessionRow | null> {
+  const client = db();
+  if (!client) throw new Error('Supabase client not initialised');
+  const { data, error } = await client
+    .from('sessions')
+    .select('*')
+    .eq('id', sessionId)
+    .single();
+  if (error) {
+    if (error.code === 'PGRST116') return null;
+    throw new Error(`getSession failed: ${error.message}`);
+  }
+  return data as SessionRow;
+}
+
 // ── users ───────────────────────────────────────────────────────────────────
 
 export async function ensureUserProfile(userId: string): Promise<void> {

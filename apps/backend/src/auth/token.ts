@@ -46,6 +46,33 @@ export async function verifySupabaseToken(
 }
 
 /**
+ * Mint a Supabase-compatible anonymous JWT for a user that was just created
+ * via the Supabase Admin API. The token has the same structure Supabase Auth
+ * would issue, signed with the project JWT secret.
+ */
+export async function createAnonymousToken(
+  userId: string,
+  jwtSecret: string,
+  expiresInS = 3600,
+): Promise<{ token: string; expiresAt: number }> {
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = now + expiresInS;
+
+  const token = await new SignJWT({
+    aud: 'authenticated',
+    role: 'authenticated',
+    is_anonymous: true,
+  })
+    .setProtectedHeader({ alg: ALG })
+    .setSubject(userId)
+    .setIssuedAt(now)
+    .setExpirationTime(expiresAt)
+    .sign(getSecret(jwtSecret));
+
+  return { token, expiresAt };
+}
+
+/**
  * Test helper -- creates a token that mimics Supabase Auth anonymous sign-in.
  * NOT for production use.
  */

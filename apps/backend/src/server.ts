@@ -6,6 +6,8 @@ import fastifyMultipart from '@fastify/multipart';
 import type { AppConfig } from './config.js';
 import { registerWSHandler } from './ws/handler.js';
 import { registerContentRoutes } from './routes/content.js';
+import { registerAuthRoutes } from './routes/auth.js';
+import { registerSessionRoutes } from './routes/sessions.js';
 import { createAdapterFactory } from './adapters/factory.js';
 import { initSupabase } from './lib/supabase.js';
 import { initRedis, getRedis, shutdownRedis } from './lib/redis.js';
@@ -46,7 +48,9 @@ export async function buildServer(config: AppConfig) {
   });
 
   // REST routes
+  await registerAuthRoutes(app, { jwtSecret: config.SUPABASE_JWT_SECRET });
   await registerContentRoutes(app, { jwtSecret: config.SUPABASE_JWT_SECRET });
+  await registerSessionRoutes(app, { jwtSecret: config.SUPABASE_JWT_SECRET });
 
   // Adapter factory (null in test mode — handler uses stubs)
   const factory =
